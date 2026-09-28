@@ -138,3 +138,23 @@ export function quotaResetLabel(resetsAtMs: number | null, nowMs: number = Date.
   const minutes = Math.floor((remainingMs % 3_600_000) / 60_000);
   return hours > 0 ? `resets ${hours}h ${minutes}m` : `resets ${minutes}m`;
 }
+
+export function quotaRecordedLabel(recordedAtMs: number, nowMs: number = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((nowMs - recordedAtMs) / 1_000));
+  if (seconds < 60) return "Recorded just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `Recorded ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Recorded ${hours}h ago`;
+  return `Recorded ${Math.floor(hours / 24)}d ago`;
+}
+
+export function quotaDetailLabel(quota: OmpQuota, nowMs: number = Date.now()): string {
+  return [
+    quota.windowLabel,
+    quotaResetLabel(quota.resetsAt, nowMs),
+    quotaRecordedLabel(quota.recordedAt, nowMs),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}

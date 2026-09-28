@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+  quotaDetailLabel,
   quotaProviderFromSession,
   quotaProviderGroups,
   quotaProviderIconName,
+  quotaRecordedLabel,
   quotaResetLabel,
   quotaSeverityForProvider,
   quotaSummaryForProvider,
@@ -77,6 +79,28 @@ describe("session-specific quota selection", () => {
 
     const currentFirst = quotaProviderGroups(quotas, "anthropic");
     expect(currentFirst.map((group) => group.provider)).toEqual(["anthropic", "cursor"]);
+  });
+});
+
+describe("quota timestamps", () => {
+  test("labels recorded quota snapshots", () => {
+    const now = Date.UTC(2026, 0, 1, 0, 0, 0);
+    expect(quotaRecordedLabel(now, now)).toBe("Recorded just now");
+    expect(quotaRecordedLabel(now - 2 * 3_600_000, now)).toBe("Recorded 2h ago");
+    expect(
+      quotaDetailLabel(
+        {
+          provider: "anthropic",
+          label: "Claude 5 Hour",
+          windowLabel: "5 Hour",
+          usedFraction: 0.25,
+          status: "ok",
+          recordedAt: now - 2 * 3_600_000,
+          resetsAt: now + 30 * 60_000,
+        },
+        now,
+      ),
+    ).toBe("5 Hour · resets 30m · Recorded 2h ago");
   });
 });
 

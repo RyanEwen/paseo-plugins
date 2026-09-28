@@ -8,11 +8,11 @@ import { listOmpQuotas } from "../shared/quota";
 import { ompStoreKey } from "./omp-store-state";
 import {
   type QuotaProviderGroup,
+  quotaDetailLabel,
   quotaProviderFromSession,
   quotaProviderGroups,
   quotaProviderIconName,
   quotaProviderLabel,
-  quotaResetLabel,
   quotaSeverityFromFraction,
 } from "./quota-state";
 
@@ -117,7 +117,7 @@ export function QuotaPopover(props: PluginButtonContentProps) {
                 color={severityColor(group.severity)}
               />
               <Text style={styles.groupLabel}>{quotaProviderLabel(group.provider)}</Text>
-              {current ? <Text style={styles.badge}>CURRENT</Text> : null}
+              <Text style={styles.badge}>{current ? "CURRENT" : "RECORDED"}</Text>
             </View>
             {group.quotas.map((quota) => {
               const severity = quotaSeverityFromFraction(quota.usedFraction);
@@ -139,11 +139,7 @@ export function QuotaPopover(props: PluginButtonContentProps) {
                   <View style={styles.track}>
                     <View style={{ height: "100%", width: `${pct}%`, backgroundColor: color }} />
                   </View>
-                  <Text style={styles.detail}>
-                    {[quota.windowLabel, quotaResetLabel(quota.resetsAt)]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </Text>
+                  <Text style={styles.detail}>{quotaDetailLabel(quota)}</Text>
                 </View>
               );
             })}

@@ -1,9 +1,22 @@
-import type { usePaseo } from "@getpaseo/plugin/client";
+import type {
+  PluginClientContext,
+  PluginSidebarItemContribution,
+  usePaseo,
+} from "@getpaseo/plugin/client";
 
 export type PaseoApi = ReturnType<typeof usePaseo>;
 export type PaseoWorkspace = Awaited<ReturnType<PaseoApi["workspaces"]["list"]>>["entries"][number];
 export type AgentEntry = Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"][number];
 type AgentSnapshot = AgentEntry["agent"];
+
+/** Sidebar header items arrived in Paseo 0.11; on older hosts the item is not registered. */
+export function addSidebarHeaderItemIfSupported(
+  client: Pick<PluginClientContext, "addSidebarHeaderItem">,
+  item: PluginSidebarItemContribution,
+): () => void {
+  if (typeof client.addSidebarHeaderItem !== "function") return () => {};
+  return client.addSidebarHeaderItem(item);
+}
 
 export function listenToCrewDirectory(paseo: PaseoApi, invalidate: () => void): () => void {
   let closed = false;
@@ -110,6 +123,13 @@ export function crewState(agent: AgentSnapshot): CrewState {
   if (agent.requiresAttention || agent.attentionReason === "finished") return "ready";
   if (agent.status === "closed") return "closed";
   return "idle";
+}
+
+export type DeliveryChoice = "steer" | "interrupt";
+
+/** Idle agents get a plain send; the choice only applies to a running turn. */
+export function sendOptions(running: boolean, choice: DeliveryChoice) {
+  return running ? { activeTurnBehavior: choice } : undefined;
 }
 
 export function isWorking(agent: AgentSnapshot): boolean {
@@ -308,4 +328,53 @@ export function collapseCrewNodes(
     }
   }
   return visible;
+}
+
+export interface ActiveCrew {
+  workspaceId: string;
+  lead: AgentEntry;
+  working: number;
+  needsInput: number;
+}
+
+/** Crews each workspace's panel shows, kept only when a member is working or needs input. */
+export function activeCrews(entries: readonly AgentEntry[]): ActiveCrew[] {
+  const workspaceIds = new Set<string>();
+  for (const { agent } of entries) {
+    if (agent.workspaceId && !agent.archivedAt) workspaceIds.add(agent.workspaceId);
+  }
+  const crews: ActiveCrew[] = [];
+  for (const workspaceId of workspaceIds) {
+    let crew: ActiveCrew | undefined;
+    for (const node of buildCrewForest(entries, workspaceId)) {
+      if (node.depth === 0) {
+        crew =
+          node.descendantCount > 0
+            ? { workspaceId, lead: node.entry, working: 0, needsInput: 0 }
+            : undefined;
+        if (crew) crews.push(crew);
+      }
+      if (!crew || !node.member) continue;
+      const state = crewState(node.entry.agent);
+      if (state === "working") crew.working += 1;
+      if (state === "needs-input") crew.needsInput += 1;
+    }
+  }
+  return crews.filter((crew) => crew.working + crew.needsInput > 0);
+}
+
+export type CrewPopoverNotice = "loading" | "error" | "empty";
+
+/**
+ * The note the Active crews popover shows, or null when its crew list speaks for itself. A failed
+ * load always wins, even over cached crews, so an outage never reads as "no crew is active".
+ */
+export function crewPopoverNotice(input: {
+  crewCount: number;
+  isPending: boolean;
+  error: unknown;
+}): CrewPopoverNotice | null {
+  if (input.error) return "error";
+  if (input.crewCount > 0) return null;
+  return input.isPending ? "loading" : "empty";
 }

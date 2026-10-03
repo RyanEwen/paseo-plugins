@@ -1,13 +1,18 @@
+import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentEntry } from "../client/crew";
 import {
+  activeCrews,
+  addSidebarHeaderItemIfSupported,
   agentAgeTimestamp,
   buildCrewForest,
   collapseCrewNodes,
   crewCounts,
+  crewPopoverNotice,
   crewState,
   formatAge,
   listenToCrewDirectory,
+  sendOptions,
 } from "../client/crew";
 
 function entry(
@@ -291,5 +296,85 @@ describe("listenToCrewDirectory", () => {
     expect(workspaces.removeObserver).toHaveBeenCalledOnce();
     expect(agents.release).toHaveBeenCalledOnce();
     expect(workspaces.release).toHaveBeenCalledOnce();
+  });
+});
+
+describe("sendOptions", () => {
+  test("passes the chosen behavior only to a running turn", () => {
+    expect(sendOptions(true, "steer")).toEqual({ activeTurnBehavior: "steer" });
+    expect(sendOptions(true, "interrupt")).toEqual({ activeTurnBehavior: "interrupt" });
+    expect(sendOptions(false, "steer")).toBeUndefined();
+  });
+});
+
+describe("activeCrews", () => {
+  const summary = (entries: AgentEntry[]) =>
+    activeCrews(entries).map(({ workspaceId, lead, working, needsInput }) => [
+      workspaceId,
+      lead.agent.id,
+      working,
+      needsInput,
+    ]);
+
+  test("keeps crews with a working or waiting member and skips idle crews and solo agents", () => {
+    const ws = { workspaceId: "ws" };
+    expect(
+      summary([
+        entry("lead", null, ws),
+        entry("worker", "lead", { ...ws, status: "running" }),
+        entry("asker", "worker", { ...ws, pendingPermissions: [{}] }),
+        entry("idle-lead", null, ws),
+        entry("idle-child", "idle-lead", ws),
+        entry("solo", null, { ...ws, status: "running" }),
+        entry("archived-lead", null, { ...ws, archivedAt: "2026-09-02T00:00:00.000Z" }),
+        entry("archived-child", "archived-lead", {
+          ...ws,
+          status: "running",
+          archivedAt: "2026-09-02T00:00:00.000Z",
+        }),
+      ]),
+    ).toEqual([["ws", "lead", 1, 1]]);
+  });
+
+  test("lists a cross-workspace crew under each panel that shows it, counting members only", () => {
+    expect(
+      summary([
+        entry("lead", null, { workspaceId: "lead-ws", status: "running" }),
+        entry("worker", "lead", { workspaceId: "worker-ws", status: "running" }),
+      ]),
+    ).toEqual([
+      ["lead-ws", "lead", 2, 0],
+      ["worker-ws", "lead", 1, 0],
+    ]);
+  });
+});
+
+describe("addSidebarHeaderItemIfSupported", () => {
+  test("registers the sidebar row only on hosts with sidebar header items", () => {
+    const item = { id: "active-crews", title: "Active crews", Component: () => null };
+    const legacyHost = {} as Pick<PluginClientContext, "addSidebarHeaderItem">;
+    expect(() => addSidebarHeaderItemIfSupported(legacyHost, item)()).not.toThrow();
+
+    const removeItem = vi.fn();
+    const addSidebarHeaderItem = vi.fn(() => removeItem);
+    addSidebarHeaderItemIfSupported({ addSidebarHeaderItem }, item)();
+    expect(addSidebarHeaderItem).toHaveBeenCalledWith(item);
+    expect(removeItem).toHaveBeenCalledOnce();
+  });
+});
+
+describe("crewPopoverNotice", () => {
+  test("never lets a failed load read as an empty crew list", () => {
+    const error = new Error("daemon unreachable");
+    // A rejected directory load has no data and is not pending.
+    expect(crewPopoverNotice({ crewCount: 0, isPending: false, error })).toBe("error");
+    // A failed refresh over cached crews still surfaces the failure.
+    expect(crewPopoverNotice({ crewCount: 2, isPending: false, error })).toBe("error");
+  });
+
+  test("tells loading, empty and listed crews apart when nothing failed", () => {
+    expect(crewPopoverNotice({ crewCount: 0, isPending: true, error: null })).toBe("loading");
+    expect(crewPopoverNotice({ crewCount: 0, isPending: false, error: null })).toBe("empty");
+    expect(crewPopoverNotice({ crewCount: 1, isPending: false, error: null })).toBeNull();
   });
 });

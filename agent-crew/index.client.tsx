@@ -1,7 +1,9 @@
 import type { PluginClientContext, PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { createAutoOpenManager } from "./client/auto-open";
+import { addSidebarHeaderItemIfSupported } from "./client/crew";
 import { AgentCrew } from "./client/main";
 import { AgentCrewSettingsScreen } from "./client/settings-screen";
+import { createActiveCrewsItem } from "./client/sidebar";
 import { agentCrewSettings } from "./shared/settings";
 
 export default function contribute(client: PluginClientContext) {
@@ -35,8 +37,14 @@ export default function contribute(client: PluginClientContext) {
       openPanel("crew", { location: "explorer" });
     },
   });
+  const removeActiveCrews = addSidebarHeaderItemIfSupported(client, {
+    id: "active-crews",
+    title: "Active crews",
+    Component: createActiveCrewsItem(client),
+  });
 
   return () => {
+    removeActiveCrews();
     removeOpenCrew();
     removeWorkspacePanel();
     removeSettings();

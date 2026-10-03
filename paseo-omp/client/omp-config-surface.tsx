@@ -914,11 +914,14 @@ function OmpConfigContent({
   cwd,
   store,
   onStoreChange,
+  storeInHistory = false,
   onComposerPillSettingsChange,
 }: PluginSurfaceProps & {
   cwd?: string;
   store?: OmpStore;
   onStoreChange(store: OmpStore | undefined): void;
+  /** True when each store selection is a separate history entry (0.11 screen params). */
+  storeInHistory?: boolean;
   onComposerPillSettingsChange?: (settings: ComposerPillSettings) => void;
 }) {
   const loadConfig = useRpc(listOmpConfig);
@@ -1074,7 +1077,9 @@ function OmpConfigContent({
             disabled={pendingMutations > 0}
           />
           <Text style={styles.muted}>
-            Switching stores clears unapplied edits and pending confirmations.
+            {storeInHistory
+              ? "Each store opens as its own page; unapplied edits stay with the previous store, and Back returns to them."
+              : "Switching stores clears unapplied edits and pending confirmations."}
           </Text>
         </>
       ) : null}
@@ -1339,9 +1344,14 @@ function OmpStoreContent(
   props: PluginSurfaceProps & {
     cwd?: string;
     onComposerPillSettingsChange?: (settings: ComposerPillSettings) => void;
+    /** Controlled selection (0.11 screen params); omitted, the surface keeps local state. */
+    store?: OmpStore;
+    onStoreChange?: (store: OmpStore | undefined) => void;
   },
 ) {
-  const [store, setStore] = useState<OmpStore>();
+  const [localStore, setLocalStore] = useState<OmpStore>();
+  const controlled = props.onStoreChange !== undefined;
+  const store = controlled ? props.store : localStore;
   // Remount every editor when its target changes: drafts, confirmations, and mutation notices
   // belong to one store/workspace and must never be applied to the next selection.
   return (
@@ -1349,7 +1359,8 @@ function OmpStoreContent(
       key={`${ompStoreKey(store)}:${props.cwd ?? "global"}`}
       {...props}
       store={store}
-      onStoreChange={setStore}
+      onStoreChange={props.onStoreChange ?? setLocalStore}
+      storeInHistory={controlled}
     />
   );
 }
@@ -1357,6 +1368,8 @@ function OmpStoreContent(
 export function OmpConfigSurface(
   props: PluginSurfaceProps & {
     onComposerPillSettingsChange: (settings: ComposerPillSettings) => void;
+    store?: OmpStore;
+    onStoreChange?: (store: OmpStore | undefined) => void;
   },
 ) {
   return <OmpStoreContent {...props} />;

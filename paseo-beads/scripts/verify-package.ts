@@ -11,6 +11,8 @@ const requiredFiles = [
   "index.server.ts",
   "client/beads-view.ts",
   "client/paseo-beads.tsx",
+  "client/ready-beads.tsx",
+  "client/ready-scan.ts",
   "client/web.ts",
   "server/beads.ts",
   "shared/beads.ts",

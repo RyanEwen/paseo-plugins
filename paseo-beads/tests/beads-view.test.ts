@@ -3,29 +3,15 @@ import {
   type BeadsView,
   buildBeadSections,
   buildBeadsView,
+  describeReadyBeads,
   issueAccessibilityLabel,
+  parseBeadScreenParams,
+  type ReadyBeadsSummary,
+  type ReadyBeadsWorkspace,
+  summarizeReadyBeads,
 } from "../client/beads-view";
 import type { BeadSummary } from "../shared/beads";
-
-function bead(id: string, overrides: Partial<BeadSummary> = {}): BeadSummary {
-  return {
-    id,
-    title: `Issue ${id}`,
-    status: "open",
-    priority: 2,
-    issueType: "task",
-    assignee: null,
-    labels: [],
-    parent: null,
-    updatedAt: "2026-09-01T12:00:00.000Z",
-    dependencyCount: 0,
-    dependentCount: 0,
-    commentCount: 0,
-    isReady: true,
-    isBlocked: false,
-    ...overrides,
-  };
-}
+import { bead, snapshot } from "./fixtures";
 
 function ids(issues: readonly BeadSummary[]): string[] {
   return issues.map((issue) => issue.id);
@@ -207,5 +193,221 @@ describe("issue accessibility labels", () => {
     expect(issueAccessibilityLabel(issue, "blocked")).toBe(
       "Open issue BD-44: Waiting for input. Priority P2. Blocked lane. Issue type task. Unassigned.",
     );
+  });
+});
+
+describe("ready beads summary", () => {
+  function workspace(id: string, project = "project-a"): ReadyBeadsWorkspace {
+    return { id, projectDisplayName: project, name: id };
+  }
+
+  function grouped({ groups }: ReadyBeadsSummary) {
+    return groups.map((group) => [group.workspace.id, ids(group.beads)]);
+  }
+
+  test("counts only the ready frontier", () => {
+    const summary = summarizeReadyBeads(
+      [
+        {
+          workspace: workspace("main"),
+          snapshot: snapshot([
+            bead("ready"),
+            bead("claimed", { status: "in_progress" }),
+            bead("blocked", { isReady: false, isBlocked: true }),
+            bead("deferred", { status: "deferred", isReady: false }),
+          ]),
+        },
+      ],
+      10,
+    );
+
+    expect(summary.count).toBe(1);
+    expect(grouped(summary)).toEqual([["main", ["ready"]]]);
+  });
+
+  test("counts an issue once however many workspaces read its database", () => {
+    const summary = summarizeReadyBeads(
+      [
+        {
+          workspace: workspace("feature"),
+          snapshot: snapshot([bead("a-1", { priority: 1 })], { databaseId: "db-a" }),
+        },
+        {
+          workspace: workspace("main"),
+          snapshot: snapshot([bead("a-1", { priority: 1 }), bead("a-2")], { databaseId: "db-a" }),
+        },
+      ],
+      10,
+    );
+
+    expect(summary.count).toBe(2);
+    expect(grouped(summary)).toEqual([
+      ["feature", ["a-1"]],
+      ["main", ["a-2"]],
+    ]);
+  });
+
+  test("does not take a rename between two reads of one database for a second issue", () => {
+    const summary = summarizeReadyBeads(
+      [
+        {
+          workspace: workspace("feature"),
+          snapshot: snapshot([bead("a-1", { title: "Fix login" })], { databaseId: "db-a" }),
+        },
+        {
+          workspace: workspace("main"),
+          snapshot: snapshot([bead("a-1", { title: "Fix sign-in" })], { databaseId: "db-a" }),
+        },
+      ],
+      10,
+    );
+
+    expect(summary.count).toBe(1);
+  });
+
+  test("keeps issues from different databases that share an ID and a title", () => {
+    const summary = summarizeReadyBeads(
+      [
+        {
+          workspace: workspace("web"),
+          snapshot: snapshot([bead("app-1")], { databaseId: "db-web" }),
+        },
+        {
+          workspace: workspace("api"),
+          snapshot: snapshot([bead("app-1")], { databaseId: "db-api" }),
+        },
+      ],
+      10,
+    );
+
+    expect(summary.count).toBe(2);
+  });
+
+  test("treats a snapshot that cannot name its database as having one of its own", () => {
+    const summary = summarizeReadyBeads(
+      [
+        { workspace: workspace("one"), snapshot: snapshot([bead("a-1")]) },
+        { workspace: workspace("two"), snapshot: snapshot([bead("a-1")]) },
+      ],
+      10,
+    );
+
+    expect(summary.count).toBe(2);
+  });
+
+  test("skips workspaces without Beads and tells unreadable ones from unavailable bd", () => {
+    const summary = summarizeReadyBeads(
+      [
+        { workspace: workspace("plain"), snapshot: snapshot([], { state: "not_initialized" }) },
+        { workspace: workspace("no-bd"), snapshot: snapshot([], { state: "bd_unavailable" }) },
+        { workspace: workspace("broken"), snapshot: null },
+        { workspace: workspace("beads", "project-b"), snapshot: snapshot([bead("b-1")]) },
+      ],
+      10,
+    );
+
+    expect(summary).toMatchObject({ count: 1, failed: 1, unavailable: 1 });
+    expect(grouped(summary)).toEqual([["beads", ["b-1"]]]);
+  });
+
+  test("lists the top ready beads by priority and still counts the rest", () => {
+    const summary = summarizeReadyBeads(
+      [
+        {
+          workspace: workspace("main"),
+          snapshot: snapshot([bead("a-low", { priority: 3 }), bead("a-high", { priority: 1 })]),
+        },
+        {
+          workspace: workspace("api", "project-b"),
+          snapshot: snapshot([bead("b-urgent", { priority: 0 })]),
+        },
+      ],
+      2,
+    );
+
+    expect(summary.count).toBe(3);
+    expect(grouped(summary)).toEqual([
+      ["api", ["b-urgent"]],
+      ["main", ["a-high"]],
+    ]);
+  });
+});
+
+describe("ready beads notes", () => {
+  function summary(overrides: Partial<ReadyBeadsSummary>): ReadyBeadsSummary {
+    return { count: 0, groups: [], failed: 0, unavailable: 0, ...overrides };
+  }
+
+  test("claims an empty host only when every workspace was checked", () => {
+    const { empty, notices } = describeReadyBeads(summary({}), null);
+
+    expect(empty).toContain("No ready beads in any workspace");
+    expect(notices).toEqual([]);
+  });
+
+  test("blames the host, not the workspaces, when bd is unavailable", () => {
+    const { empty } = describeReadyBeads(summary({ unavailable: 3 }), null);
+
+    expect(empty).toContain("bd CLI is not available");
+  });
+
+  test("qualifies an empty result when workspaces could not be read", () => {
+    const one = describeReadyBeads(summary({ failed: 1 }), null);
+    const many = describeReadyBeads(summary({ failed: 2 }), null);
+
+    expect(one.empty).not.toContain("any workspace");
+    expect(one.notices).toEqual(["1 workspace could not be read."]);
+    expect(many.notices).toEqual(["2 workspaces could not be read."]);
+  });
+
+  test("reports a failed refresh next to the previous result", () => {
+    const withReady = describeReadyBeads(summary({ count: 3 }), "Request timed out.");
+    const withNone = describeReadyBeads(summary({}), "Request timed out.");
+
+    expect(withReady.empty).toBeNull();
+    expect(withReady.notices).toEqual([
+      "Refresh failed, showing the last result. Request timed out.",
+    ]);
+    expect(withNone.empty).not.toContain("any workspace");
+  });
+
+  test("warns when bd was unavailable for some workspaces while others have ready beads", () => {
+    const one = describeReadyBeads(summary({ count: 2, unavailable: 1 }), null);
+    const many = describeReadyBeads(summary({ count: 2, unavailable: 3 }), null);
+
+    expect(one.empty).toBeNull();
+    expect(one.notices).toEqual([
+      "The bd CLI was unavailable for 1 workspace, so the count may be incomplete.",
+    ]);
+    expect(many.notices).toEqual([
+      "The bd CLI was unavailable for 3 workspaces, so the count may be incomplete.",
+    ]);
+  });
+
+  test("adds no caveats to a clean result", () => {
+    expect(describeReadyBeads(summary({ count: 4 }), null)).toEqual({ empty: null, notices: [] });
+  });
+});
+
+describe("bead screen params", () => {
+  test("reads the workspace and bead IDs and ignores other params", () => {
+    expect(parseBeadScreenParams({ workspace: "ws-1", bead: "demo-d4f", tab: "notes" })).toEqual({
+      workspaceId: "ws-1",
+      issueId: "demo-d4f",
+    });
+  });
+
+  test("rejects links the detail RPC would refuse", () => {
+    const invalid: Record<string, string>[] = [
+      {},
+      { workspace: "ws-1" },
+      { bead: "demo-d4f" },
+      { workspace: "", bead: "demo-d4f" },
+      { workspace: "ws-1", bead: "" },
+      { workspace: "ws-1", bead: "--help" },
+      { workspace: "ws-1", bead: "x".repeat(257) },
+    ];
+
+    for (const params of invalid) expect(parseBeadScreenParams(params)).toBeNull();
   });
 });

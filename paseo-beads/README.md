@@ -4,7 +4,8 @@ A dependency-aware Beads work queue for every Paseo workspace. Paseo Beads turns
 a read-only delivery view that makes the ready frontier, work in progress, and blockers immediately
 visible.
 
-It adds a workspace-scoped **Beads** Explorer panel and an **Open Beads** Command Center item.
+It adds a workspace-scoped **Beads** Explorer panel and an **Open Beads** Command Center item. On
+Paseo 0.11 and newer it also adds a **Ready beads** sidebar row and a linkable bead screen.
 
 ## Demo
 
@@ -36,6 +37,10 @@ verified the rendered page contained no private organization names.
   layouts.
 - A virtualized issue list, descriptive accessibility labels, and focus restoration when navigating
   between the compact list and detail view.
+- On Paseo 0.11 and newer, a **Ready beads** sidebar row with the number of ready beads across the
+  host's workspaces. Pressing it opens a popover (a bottom sheet in compact layouts) with the top 10
+  ready beads grouped by workspace. Pressing a bead opens its detail view as a screen whose URL
+  carries the workspace and bead IDs, so it can be linked and survives a reload.
 
 Within each lane, issues are ordered by priority, most recent update, then ID. In-progress and hooked
 issues enter **In progress** first; remaining blocked issues enter **Blocked**; ready issues enter
@@ -47,7 +52,10 @@ The panel calls workspace-scoped Paseo plugin RPC handlers. On the daemon host, 
 the workspace directory through Paseo and executes the `bd` CLI with `--readonly` and `-C`:
 
 - The list handler runs `bd list --json --sort priority`, then runs one authoritative
-  `bd list --ready --json --limit 0` query and intersects its IDs with the displayed issues.
+  `bd list --ready --json --limit 0` query and intersects its IDs with the displayed issues. It also
+  runs `bd where --json` and returns a digest of the database location as an opaque `databaseId`,
+  so workspaces that share one database, such as git worktrees, can be recognized. This is best
+  effort: when `bd` cannot say, the snapshot is the same without it.
 - Selecting an issue runs `bd show <issue-id> --json --include-dependents` plus the same authoritative
   readiness query.
 
@@ -57,6 +65,20 @@ plugin never reads or writes `.beads` storage directly and exposes no issue muta
 The list and selected detail poll every 10 seconds. **Refresh** requests the list immediately. A
 failed background refresh keeps the previous data visible with an inline error; initial and detail
 failures provide a retry action.
+
+The **Ready beads** row lists the host's workspaces through the Paseo SDK and calls the same list
+handler for them, one workspace at a time, every 2 minutes while the app is in the foreground and
+whenever its popover opens. A snapshot an open panel read in the last 10 seconds is reused instead
+of rerunning `bd`. Workspaces that share a database, such as git worktrees, report the same
+`databaseId`, so an issue counts once however many workspaces read it and is listed under the first
+workspace that reported it. The first scan reads every workspace to learn which ones share a
+database. Later scans read each database once and skip its other workspaces. A workspace is skipped
+only while a successful read in the last 10 minutes vouches that it reads a database the scan has
+already read, so a failed or older read puts it back in the scan. Workspaces without Beads count as
+zero and are rechecked every 5 minutes. When `bd` is unavailable, or a workspace cannot be read,
+the popover says so instead of reporting an empty host, and a failed refresh is shown next to the
+last result. Once nothing shows the count, for example when the host disconnects, a scan that is
+still running starts no further workspace reads.
 
 ## Limits
 
@@ -74,6 +96,15 @@ failures provide a retry action.
   project, request failures, and missing issue details.
 - This plugin is read-only and workspace-scoped. It uses the `bd` CLI exclusively and does not
   create, edit, close, or assign issues.
+- The **Ready beads** row and the bead screen need Paseo 0.11. On 0.9 and 0.10 they do not register,
+  and the panel and Command Center items work as before.
+- The **Ready beads** count covers the first 200 workspaces the host lists and, like the panel, the
+  first 500 issues of each workspace. It refreshes about every two minutes while the app is in the
+  foreground, plus the time a scan takes, and when the popover opens, so it can be older after the
+  app was in the background. A workspace that moves to another database is noticed within 10
+  minutes.
+- A `bd` that cannot report its database (`bd where --json`) leaves every workspace counted on its
+  own, so git worktrees of one project are counted separately.
 
 ## Install
 
@@ -96,7 +127,8 @@ Paseo shows the installed and proposed revisions and asks for approval before ap
 update. Review the source changes before approving them.
 
 Open a workspace, choose **New tab** in Explorer, then select **Beads**. You can also run **Open
-Beads** from the Command Center while viewing a workspace or one of its agents.
+Beads** from the Command Center while viewing a workspace or one of its agents. On Paseo 0.11 and
+newer, press **Ready beads** in the sidebar for ready work across every workspace on the host.
 
 ## Develop
 

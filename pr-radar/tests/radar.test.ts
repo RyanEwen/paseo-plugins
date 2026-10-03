@@ -18,6 +18,12 @@ import {
   type RadarAgent,
   type RadarRow,
 } from "../client/radar";
+import {
+  needsYouSummary,
+  parseRadarParams,
+  radarWarnings,
+  supportsRadarScreen,
+} from "../client/screen-state";
 import { type GitHubInboxItem, GitHubInboxItemSchema } from "../shared/viewer-scope";
 
 function agent(overrides: Partial<RadarAgent> = {}): RadarAgent {
@@ -67,6 +73,57 @@ function row(overrides: Partial<RadarRow> = {}): RadarRow {
     ...overrides,
   };
 }
+
+describe("sidebar queue and screen state", () => {
+  test("counts classified needs-you rows, without including ready PRs", () => {
+    const rows = [row({ bucket: "needs-you" }), row({ id: "other", bucket: "ready" })];
+    expect(needsYouSummary(rows, false, [])).toEqual({ items: [rows[0]], label: "1" });
+    expect(needsYouSummary(rows, false, ["Viewer unavailable"]).label).toBe("1+");
+    expect(needsYouSummary([], false, ["Inbox truncated"]).label).toBe("0+");
+    expect(needsYouSummary([], true, []).label).toBe("…");
+  });
+  test("preserves PR identity and accepts only supported filters", () => {
+    expect(parseRadarParams({ pr: "getpaseo/paseo#42", filter: "needs-you" })).toEqual({
+      pr: "getpaseo/paseo#42",
+      filter: "needs-you",
+    });
+    expect(parseRadarParams({ filter: "active", pr: "Getpaseo/Paseo#42" })).toEqual({
+      filter: "active",
+      pr: "getpaseo/paseo#42",
+    });
+    expect(parseRadarParams({ filter: "bogus", pr: "" })).toEqual({ pr: null, filter: null });
+    expect(parseRadarParams({})).toEqual({ pr: null, filter: null });
+  });
+  test("every partial-result cause yields a warning, and a clean queue none", () => {
+    const clean = {
+      directoryError: false,
+      directoryTruncated: false,
+      workspaceWarnings: 0,
+      viewerKnown: true,
+      viewerTruncated: false,
+      urlCount: 200,
+    };
+    expect(radarWarnings(clean)).toEqual([]);
+    for (const partial of [
+      { directoryError: true },
+      { directoryTruncated: true },
+      { workspaceWarnings: 1 },
+      { viewerKnown: false },
+      { viewerTruncated: true },
+      { urlCount: 201 },
+    ]) {
+      expect(radarWarnings({ ...clean, ...partial })).toHaveLength(1);
+    }
+  });
+  test("older and partially upgraded hosts use the static path", () => {
+    const modern = { addScreen() {}, addSidebarHeaderItem() {}, openScreen() {} };
+    expect(supportsRadarScreen(modern, () => null)).toBe(true);
+    expect(supportsRadarScreen({}, undefined)).toBe(false);
+    for (const capability of Object.keys(modern))
+      expect(supportsRadarScreen({ ...modern, [capability]: undefined }, () => null)).toBe(false);
+    expect(supportsRadarScreen(modern, undefined)).toBe(false);
+  });
+});
 
 function workspace(
   id: string,

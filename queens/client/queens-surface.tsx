@@ -1,7 +1,9 @@
 import {
   type PluginClientContext,
+  type PluginScreenProps,
   type PluginSurfaceProps,
   usePaseo,
+  useSettings,
 } from "@getpaseo/plugin/client";
 import { useToast } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -15,6 +17,7 @@ import {
   View,
   type ViewStyle,
 } from "react-native";
+import { gameSettings } from "../shared/game-settings";
 import { CompletionFeedback } from "./completion-feedback";
 import { findConflicts } from "./game";
 import type { CuratedPuzzleDeck } from "./game/curated";
@@ -22,6 +25,7 @@ import { GameControls } from "./game-controls";
 import { GameMark } from "./game-mark";
 import { PuzzleSelector } from "./puzzle-selector";
 import { QueensBoard } from "./queens-board";
+import { parsePuzzleParam } from "./screen-navigation";
 import { usePersistedGame } from "./use-persisted-game";
 import { type PuzzleCatalogState, usePuzzleCatalog } from "./use-puzzle-catalog";
 
@@ -110,9 +114,53 @@ export function PaseoQueensSurface(props: PluginSurfaceProps) {
   return <QueensGame key={props.host.id} {...props} />;
 }
 
-function QueensGame(props: PluginSurfaceProps) {
+export function PaseoQueensScreen(props: PluginScreenProps) {
+  return (
+    <QueensGame
+      key={`${props.host.id}:${props.params.puzzle ?? ""}`}
+      {...props}
+      puzzleParam={props.params.puzzle}
+    />
+  );
+}
+
+function QueensGame(props: PluginSurfaceProps & { puzzleParam?: string }) {
   const catalog = usePuzzleCatalog();
-  if (!catalog.deck) {
+  const settings = useSettings(gameSettings);
+  const requested = parsePuzzleParam(props.puzzleParam);
+  const [opening, setOpening] = useState(requested !== null);
+  const [linkError, setLinkError] = useState(false);
+  const selected = useRef(false);
+  const openPuzzle = () => {
+    if (!requested) return;
+    setOpening(true);
+    setLinkError(false);
+    void catalog.select(requested.size, requested.difficulty, requested.id).then((saved) => {
+      if (saved) return;
+      setLinkError(true);
+      setOpening(false);
+    });
+  };
+  const openSaved = () => {
+    setLinkError(false);
+    setOpening(false);
+  };
+  const deckKey = catalog.deck?.key;
+  useEffect(() => {
+    if (!opening || settings.status === "loading") return;
+    if (!requested || settings.status !== "ready") {
+      setOpening(false);
+      return;
+    }
+    if (settings.values.currentPuzzleId === requested.id) {
+      if (deckKey === `${requested.size}-${requested.difficulty}`) setOpening(false);
+      return;
+    }
+    if (selected.current) return;
+    selected.current = true;
+    openPuzzle();
+  }, [opening, requested, settings, deckKey]);
+  if (!catalog.deck || opening || linkError) {
     return (
       <View
         style={{
@@ -133,26 +181,39 @@ function QueensGame(props: PluginSurfaceProps) {
               : props.theme.colors.foregroundMuted,
           }}
         >
-          {catalog.error ?? "Loading curated puzzles…"}
+          {linkError
+            ? "The linked puzzle could not be opened."
+            : (catalog.error ?? "Loading curated puzzles…")}
         </Text>
-        {catalog.error ? (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Retry puzzle download"
-            onPress={catalog.retry}
-            style={{
-              minHeight: 40,
-              justifyContent: "center",
-              paddingHorizontal: 16,
-              borderWidth: StyleSheet.hairlineWidth,
-              borderColor: props.theme.colors.border,
-              borderRadius: 8,
-              backgroundColor: props.theme.colors.surface2,
-            }}
-          >
-            <Text style={{ color: props.theme.colors.foreground, fontWeight: "700" }}>Retry</Text>
-          </Pressable>
-        ) : null}
+        {catalog.error || linkError
+          ? (linkError
+              ? [
+                  ["Try again", openPuzzle],
+                  ["Open saved puzzle", openSaved],
+                ]
+              : [["Retry", catalog.retry]]
+            ).map(([label, onPress]) => (
+              <Pressable
+                key={label as string}
+                accessibilityRole="button"
+                accessibilityLabel={label as string}
+                onPress={onPress as () => void}
+                style={{
+                  minHeight: 40,
+                  justifyContent: "center",
+                  paddingHorizontal: 16,
+                  borderWidth: StyleSheet.hairlineWidth,
+                  borderColor: props.theme.colors.border,
+                  borderRadius: 8,
+                  backgroundColor: props.theme.colors.surface2,
+                }}
+              >
+                <Text style={{ color: props.theme.colors.foreground, fontWeight: "700" }}>
+                  {label as string}
+                </Text>
+              </Pressable>
+            ))
+          : null}
       </View>
     );
   }

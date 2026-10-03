@@ -14,7 +14,11 @@ export type PuzzleCatalogState = {
   readonly loading: boolean;
   readonly error: string | null;
   readonly retry: () => void;
-  readonly select: (size: number, difficulty: PuzzleDifficulty) => Promise<boolean>;
+  readonly select: (
+    size: number,
+    difficulty: PuzzleDifficulty,
+    puzzleId?: string,
+  ) => Promise<boolean>;
 };
 
 export function usePuzzleCatalog(): PuzzleCatalogState {
@@ -72,24 +76,27 @@ export function usePuzzleCatalog(): PuzzleCatalogState {
   }, [refresh]);
 
   const select = useCallback(
-    async (nextSize: number, nextDifficulty: PuzzleDifficulty) => {
+    async (nextSize: number, nextDifficulty: PuzzleDifficulty, puzzleId?: string) => {
       if (settings.status !== "ready") return false;
       setLoading(true);
       setError(null);
       try {
         const nextDeck = await getDeck(nextSize, nextDifficulty);
-        const firstPuzzle = nextDeck.puzzles[0];
-        if (!firstPuzzle) throw new RangeError("The curated puzzle deck is empty.");
+        const selectedPuzzle = puzzleId
+          ? nextDeck.puzzles.find((puzzle) => puzzle.id === puzzleId)
+          : nextDeck.puzzles[0];
+        if (!selectedPuzzle) throw new RangeError("The requested curated puzzle is unavailable.");
         const saved = await settings.save(
           {
             ...settings.values,
             boardSize: nextSize,
             difficulty: nextDifficulty,
-            currentPuzzleId: firstPuzzle.id,
+            currentPuzzleId: selectedPuzzle.id,
           },
           settings.revision,
         );
         if (!saved) throw new Error("Puzzle selection was not saved.");
+        if (nextSize === size && nextDifficulty === difficulty) setLoading(false);
         return true;
       } catch (selectionError) {
         setError(
@@ -99,7 +106,7 @@ export function usePuzzleCatalog(): PuzzleCatalogState {
         return false;
       }
     },
-    [getDeck, settings],
+    [difficulty, getDeck, settings, size],
   );
 
   const retry = useCallback(() => {

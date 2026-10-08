@@ -986,6 +986,8 @@ export function SharedBrowserPanel({
     state?.navigationGeneration,
     state?.viewportGeneration,
   ]);
+  // Touch-first surfaces (native and compact web) get the explicit draft; desktop web types on the canvas.
+  const composeAvailable = layout.platform !== "web" || layout.compact;
   const requestCompose = (kind: "compose" | "commit") => {
     if (!canSendInput) return;
     nextComposeRequest.current += 1;
@@ -1828,7 +1830,7 @@ export function SharedBrowserPanel({
         </View>
       </View>
 
-      {layout.platform !== "web" ? (
+      {composeAvailable ? (
         <ComposeTextControls
           styles={styles}
           theme={theme}
@@ -2071,9 +2073,9 @@ export function SharedBrowserPanel({
           preferredHeight={
             toolbarMenu === "display"
               ? 300 + preferences.favoritePresetIds.length * (layout.compact ? 44 : 36)
-              : layout.platform === "web"
-                ? 132
-                : 220
+              : composeAvailable
+                ? 220
+                : 132
           }
           onClose={() => closeToolbarMenu()}
           shouldRestoreFocus={() => menuRestoreFocus.current}
@@ -2204,7 +2206,7 @@ export function SharedBrowserPanel({
             </>
           ) : (
             <>
-              {layout.platform !== "web" ? (
+              {composeAvailable ? (
                 <BrowserMenuItem
                   theme={theme}
                   compact={layout.compact}

@@ -15,8 +15,8 @@ lost text. Tab changes remote focus while the local relay keeps receiving keys.
 Paseo inputs outside the focused canvas remain local.
 
 Native phone typing has no live software-keyboard relay: it is unverified on
-physical devices. Text is composed locally in a visible draft and inserted once
-by an explicit Done. Phone hardware shortcuts are unsupported.
+physical devices. Native and compact-web layouts offer a visible Compose draft
+inserted once by an explicit Done. Phone hardware shortcuts are unsupported.
 
 Local plain-text paste is forwarded. Copy/cut target the remote browser clipboard;
 there is no remote-to-local clipboard synchronization. Browser and operating-system

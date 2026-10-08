@@ -38,6 +38,8 @@ interface RuntimeOwnerOptions {
    * Explicit false overrides the environment.
    */
   virtualDisplay?: boolean;
+  /** Encoded video is opt-in; defaults to PASEO_SHARED_BROWSER_VIDEO=1 in the daemon environment. */
+  nativeVideo?: boolean;
 }
 
 function paseoHome(): string {
@@ -136,6 +138,7 @@ export async function createRuntimeOwner(
           session: `ws-${hash.slice(0, 16)}`,
           initialUrl: options.initialUrl ?? DEFAULT_BROWSER_URL,
           headed: display ? true : (options.headed ?? false),
+          nativeVideo: options.nativeVideo ?? process.env.PASEO_SHARED_BROWSER_VIDEO === "1",
           ...(display ? { launchEnvironment: display.launchEnvironment } : {}),
         };
         runtime = new AgentBrowserRuntime(runtimeOptions);

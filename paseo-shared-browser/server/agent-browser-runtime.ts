@@ -148,6 +148,8 @@ export interface AgentBrowserRuntimeOptions {
   headed?: boolean;
   /** Trusted per-instance private X11 context, only DISPLAY/XAUTHORITY; never mutates host environment. */
   launchEnvironment?: Readonly<Record<string, string>>;
+  /** Trusted daemon-side opt-in. Only then is the capture extension materialized and loaded. */
+  nativeVideo?: boolean;
   timeoutMs?: number;
   /** Bound for the session daemon to exit after close or SIGKILL. */
   daemonExitWaitMs?: number;
@@ -315,6 +317,7 @@ export class AgentBrowserRuntime {
   private shutDown = false;
   /** A daemon was launched for this session, so absence of evidence is not proof of exit. */
   private daemonLaunched = false;
+  private readonly nativeVideo: boolean;
   private video: NativeVideoCapture | null = null;
   private videoRetirement: Promise<void> | null = null;
   private ownsBrowser = true;
@@ -340,6 +343,7 @@ export class AgentBrowserRuntime {
       this.ownerNonce,
     );
     this.initialUrl = options.initialUrl ?? "about:blank";
+    this.nativeVideo = options.nativeVideo === true;
   }
 
   async launch(): Promise<void> {
@@ -355,12 +359,16 @@ export class AgentBrowserRuntime {
     this.assertRuntimeOpen();
     await this.assertVersion();
     this.assertRuntimeOpen();
-    const videoExtension = await prepareNativeVideoExtension(this.ipcDirectory);
+    // Image-only sessions never materialize, load or allowlist the capture
+    // extension, so its tabCapture/debugger permissions do not exist in them.
+    const videoExtension = this.nativeVideo
+      ? await prepareNativeVideoExtension(this.ipcDirectory)
+      : null;
     this.assertRuntimeOpen();
     const existingArguments = process.env.PASEO_SHARED_BROWSER_CHROMIUM_ARGS;
     const chromiumArguments = [
       existingArguments,
-      `--allowlisted-extension-id=${NATIVE_VIDEO_EXTENSION_ID}`,
+      videoExtension ? `--allowlisted-extension-id=${NATIVE_VIDEO_EXTENSION_ID}` : undefined,
     ]
       .filter(Boolean)
       .join(",");
@@ -375,8 +383,7 @@ export class AgentBrowserRuntime {
       this.profilePath,
       "--executable-path",
       this.executablePath,
-      "--extension",
-      videoExtension,
+      ...(videoExtension ? ["--extension", videoExtension] : []),
       "--hide-scrollbars",
       "false",
       ...(this.headed ? ["--headed"] : []),
@@ -863,6 +870,14 @@ export class AgentBrowserRuntime {
     waitMs?: number;
     requestKeyFrame?: boolean;
   }): Promise<NativeVideoRead & { inputGeneration: string }> {
+    if (!this.nativeVideo) {
+      return {
+        ...this.videoReset(),
+        status: "unsupported",
+        reasonCode: "video-disabled",
+        reason: "Encoded video is not enabled on this host",
+      };
+    }
     const settings = resolveVideoEncoderSettings(input);
     const transitionEpoch = this.videoTransitionEpoch;
     if (!this.videoMayStart(transitionEpoch)) return this.videoReset();

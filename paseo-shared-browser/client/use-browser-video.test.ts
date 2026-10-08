@@ -278,6 +278,16 @@ function setup(retainDocumentDisplay = false) {
         packets: [{ ...packet(sequence), type: keyFrame ? "key" : "delta" }],
       } as BrowserVideoReadReply);
     },
+    disabled(index: number) {
+      harness.reads[index]!.resolve({
+        status: "unsupported",
+        state: {},
+        streamId: null,
+        packets: [],
+        reasonCode: "video-disabled",
+        reason: "Encoded video is not enabled on this host",
+      } as unknown as BrowserVideoReadReply);
+    },
     capacity(index: number) {
       harness.reads[index]!.resolve({
         status: "unsupported",
@@ -510,6 +520,18 @@ describe("video presentation lifecycle", () => {
     f.commit();
     expect(result.error).toBeNull();
     expect(result.frontRef.current).not.toBeNull();
+  });
+  it("a host that disabled video stops reads and releases the decoder without an error", async () => {
+    const f = setup();
+    f.disabled(0);
+    await drain();
+    const result = f.render();
+    f.commit();
+    expect(result.front).toBeNull();
+    expect(result.error).toBeNull();
+    expect(harness.disposals).toBe(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(harness.reads).toHaveLength(1);
   });
   it("hidden/unmounted viewers cancel the capacity retry timer and cannot restart background reads", async () => {
     const f = setup();

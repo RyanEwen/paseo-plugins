@@ -758,7 +758,9 @@ export class SessionManager {
           streamId: raw.streamId,
           packets,
           ...(typeof raw.reason === "string" ? { reason: raw.reason } : {}),
-          ...(raw.reasonCode === "encoder-capacity" ? { reasonCode: raw.reasonCode } : {}),
+          ...(raw.reasonCode === "encoder-capacity" || raw.reasonCode === "video-disabled"
+            ? { reasonCode: raw.reasonCode }
+            : {}),
         });
       });
     } finally {

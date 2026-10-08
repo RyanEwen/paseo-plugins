@@ -279,12 +279,30 @@ Published input, unknown outcomes, expired leases, and replaced contexts are nev
 
 ## Optional Linux desktop hover
 
-When Xvfb is already installed, hidden Linux browsers use an owned private
-display to expose desktop pointer and hover behavior. No visible window opens
-and no TCP or pathname listener is created. The display is stopped with its
-browser, and unavailable Xvfb retains headless behavior.
+Hidden browsers are headless by default. To expose desktop pointer and hover
+behavior on Linux, opt in by setting `PASEO_SHARED_BROWSER_XVFB=1` (exactly `1`;
+any other value stays headless) in the environment of the Shared Browser
+supervisor process. The supervisor is a detached process that inherits the
+daemon environment when it is spawned, so changing the variable affects it only
+after that supervisor process restarts. Within a running supervisor the variable
+is read each time a workspace browser runtime is created; existing runtimes keep
+their mode. A trusted embedding can pass `virtualDisplay: true | false` to
+`createRuntimeOwner`; an explicit `false` overrides the variable.
 
-Set `PASEO_SHARED_BROWSER_XVFB=0` in the daemon environment to opt out and keep
-the original headless launch behavior. The setting applies when a browser runtime
-is created; it does not replace existing workspace runtimes. The plugin never
-installs Xvfb or changes host display settings.
+When opted in and `/usr/bin/Xvfb` exists, each hidden Linux browser uses its own
+private, authenticated display. No visible window opens and no TCP or pathname
+listener is created. The display is stopped with its browser. Headed mode and
+non-Linux platforms are unchanged. The plugin never installs Xvfb or changes host
+display settings.
+
+If the display cannot start, the browser falls back to headless and the viewer
+shows a short notice (for example "Private display unavailable: Xvfb was not
+found."). The notice never contains paths or credentials. If an opted-in display
+dies while running, requests fail and the viewer shows an error; use **Reconnect
+viewer** to replace the browser. Reconnect discards the old runtime and starts a
+new one, so the page reloads from its initial URL, and old viewer, control and
+input attachments are rejected. Nothing is replayed automatically.
+
+Known limitation: if the supervisor is killed with SIGKILL it cannot stop its
+child, so an orphaned Xvfb process and its private authority directory under the
+temporary directory can remain until removed manually.

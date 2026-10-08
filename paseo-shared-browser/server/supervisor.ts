@@ -20,6 +20,7 @@ import {
   parseRuntimeRequest,
   RUNTIME_PROTOCOL_VERSION,
   type RuntimeDescriptor,
+  RuntimeLostError,
   RuntimeProtocolError,
   type RuntimeRequest,
   type RuntimeResponse,
@@ -60,6 +61,7 @@ export interface RuntimeSupervisorOptions<Runtime extends RuntimeInstance> {
 
 interface WorkspaceEntry<Runtime extends RuntimeInstance> {
   createdAt: number;
+  lost?: boolean;
   runtime: Runtime;
 }
 
@@ -210,6 +212,12 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
     return this.runWorkspaceOperation(workspaceId, async () => {
       if (this.archived.has(workspaceId)) this.workspaceArchived(workspaceId);
       let entry = this.workspaces.get(workspaceId);
+      if (entry?.lost) {
+        // Fail closed: release the dead runtime before any replacement exists.
+        this.workspaces.delete(workspaceId);
+        await this.owner.stop(entry.runtime);
+        entry = undefined;
+      }
       if (!entry) {
         let creation = this.creations.get(workspaceId);
         if (!creation) {
@@ -248,6 +256,10 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
         return result;
       } catch (error) {
         if (error instanceof RuntimeProtocolError) throw error;
+        if (error instanceof RuntimeLostError) {
+          entry.lost = true;
+          throw new RuntimeProtocolError("RUNTIME_LOST", error.message);
+        }
         if (error instanceof CdpUnknownOutcomeError)
           throw new RuntimeProtocolError(
             "UNKNOWN_OUTCOME",

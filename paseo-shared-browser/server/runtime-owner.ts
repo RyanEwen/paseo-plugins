@@ -6,7 +6,11 @@ import { AgentBrowserRuntime, type BrowserViewport } from "./agent-browser-runti
 import { resolveBrowserRuntimeRoot } from "./runtime-path";
 import type { JsonValue } from "./runtime-protocol";
 import type { RuntimeOwner } from "./supervisor";
-import { createPrivateVirtualDisplay, type PrivateVirtualDisplay } from "./virtual-display";
+import {
+  createPrivateVirtualDisplay,
+  PrivateDisplayError,
+  type PrivateVirtualDisplay,
+} from "./virtual-display";
 
 const DEFAULT_BROWSER_URL = "https://example.com/";
 
@@ -14,11 +18,17 @@ interface OwnedRuntime {
   runtimeId: string;
   runtime: AgentBrowserRuntime;
   display: PrivateVirtualDisplay | null;
+  /** Bounded, secret-free reason an opted-in private display is not in use. */
+  displayNotice: string | null;
 }
 interface RuntimeOwnerOptions {
   initialUrl?: string;
   headed?: boolean;
-  /** Explicit false keeps upstream headless launch behavior, including on Linux with Xvfb installed. */
+  /**
+   * Trusted opt-in for a private Linux Xvfb display. When omitted, each runtime creation reads
+   * PASEO_SHARED_BROWSER_XVFB from this process's environment and enables it only for "1".
+   * Explicit false overrides the environment.
+   */
   virtualDisplay?: boolean;
 }
 
@@ -56,19 +66,21 @@ export async function createRuntimeOwner(
       // Explicit headed mode uses the caller's real display. Hidden Linux mode
       // gets a private virtual mouse so native pointer media survive emulation.
       let display: PrivateVirtualDisplay | null = null;
-      if (
-        !options.headed &&
-        options.virtualDisplay !== false &&
-        process.env.PASEO_SHARED_BROWSER_XVFB !== "0"
-      ) {
+      let displayNotice: string | null = null;
+      const wantsDisplay = options.virtualDisplay ?? process.env.PASEO_SHARED_BROWSER_XVFB === "1";
+      if (!options.headed && wantsDisplay) {
         try {
           display = await createPrivateVirtualDisplay();
-        } catch {
+          if (!display) displayNotice = "Private display unavailable: Xvfb was not found.";
+        } catch (error) {
           // The helper has finished cleanup and no Chromium was constructed yet.
-          // Optional display support must not break existing headless installs.
-          console.warn(
-            "[shared-browser] Private display unavailable; using existing headless mode.",
-          );
+          displayNotice = `Private display unavailable: ${
+            error instanceof PrivateDisplayError ? error.message : "unexpected startup failure"
+          }.`;
+        }
+        if (displayNotice) {
+          // The detached supervisor discards stdio; the notice also reaches the viewer state.
+          console.warn(`[shared-browser] ${displayNotice} Using headless mode.`);
         }
       }
       let runtime: AgentBrowserRuntime | null = null;
@@ -85,7 +97,7 @@ export async function createRuntimeOwner(
         });
         await runtime.launch();
         display?.assertAvailable();
-        return { runtimeId: randomUUID(), runtime, display };
+        return { runtimeId: randomUUID(), runtime, display, displayNotice };
       } catch (error) {
         try {
           await runtime?.shutdown();
@@ -103,8 +115,13 @@ export async function createRuntimeOwner(
           : {};
       const gestureId = typeof data.gestureId === "string" ? data.gestureId : undefined;
       switch (operation) {
-        case "identity":
-          return owned.runtime.identity() as unknown as JsonValue;
+        case "identity": {
+          const identity = await owned.runtime.identity();
+          return {
+            ...identity,
+            ...(owned.displayNotice ? { displayNotice: owned.displayNotice } : {}),
+          } as unknown as JsonValue;
+        }
         case "state":
           return owned.runtime.state() as unknown as JsonValue;
         case "navigate":

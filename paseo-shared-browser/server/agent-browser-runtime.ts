@@ -238,6 +238,7 @@ export class AgentBrowserRuntime {
   private readonly headed: boolean;
   private readonly timeoutMs: number;
   private readonly environment: NodeJS.ProcessEnv;
+  private readonly privateDisplay: boolean;
   private connection: CdpConnection | null = null;
   private page: CdpSession | null = null;
   private targetId: string | null = null;
@@ -277,6 +278,7 @@ export class AgentBrowserRuntime {
     this.headed = options.headed ?? false;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.environment = runtimeEnvironment(this.ipcDirectory, options.launchEnvironment);
+    this.privateDisplay = options.launchEnvironment !== undefined;
     this.initialUrl = options.initialUrl ?? "about:blank";
   }
 
@@ -1105,22 +1107,29 @@ export class AgentBrowserRuntime {
         await this.shutdown(true);
         return;
       }
+      // The daemon keeps the launch environment it started with. A private display ends
+      // with its runtime, so a surviving daemon would relaunch Chromium on a dead display.
+      if (this.privateDisplay) await this.discardDaemon();
     } else {
-      const pid = await this.daemonPid();
-      if (pid !== null) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-        }
-      }
-      await this.removeIpcMetadata();
+      await this.discardDaemon();
     }
     this.connection?.close();
     this.connection = null;
     this.page = null;
     this.targetId = null;
     this.invalidateScreencastFrame();
+  }
+
+  private async discardDaemon(): Promise<void> {
+    const pid = await this.daemonPid();
+    if (pid !== null) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+    await this.removeIpcMetadata();
   }
 
   private async assertVersion(): Promise<void> {

@@ -31,7 +31,7 @@ import {
 } from "../shared/capture-settings";
 import { BrowserGesture } from "./browser-gesture";
 import { sameRuntimeInputAttachment } from "./input-generation";
-import type { JsonValue } from "./runtime-protocol";
+import { type JsonValue, RuntimeProtocolError } from "./runtime-protocol";
 export type WorkspaceValidator = (workspaceId: string) => Promise<void | boolean>;
 type NavigateInput = RpcInput<typeof navigateBrowserRpc>;
 type ResizeInput = RpcInput<typeof resizeBrowserRpc>;
@@ -120,6 +120,9 @@ interface BrowserSession {
   canGoBack: boolean;
   canGoForward: boolean;
   error: string | null;
+  notice: string | null;
+  /** Set when the runtime reported it can never serve again; the next attach replaces it. */
+  runtimeLost: boolean;
   archived: boolean;
   gesture: BrowserGesture | null;
   inputGeneration: string | null;
@@ -222,7 +225,13 @@ export class SessionManager {
     const validation = await this.validateWorkspace(workspaceId);
     if (validation === false) throw new Error("Workspace not found");
     this.assertOpen();
-    const session = await this.getOrCreateSession(workspaceId);
+    let session = await this.getOrCreateSession(workspaceId);
+    if (session.runtimeLost) {
+      // Explicit reconnect replaces a dead runtime. The new session id and runtime id
+      // fence every old viewer, control lease and gesture; nothing is replayed.
+      await this.discardSession(session);
+      session = await this.getOrCreateSession(workspaceId);
+    }
     return this.serialize(session, async () => {
       this.pruneExpired(session);
       if (session.viewers.size >= MAX_VIEWERS_PER_SESSION)
@@ -274,6 +283,16 @@ export class SessionManager {
     session.viewers.clear();
     session.controller = null;
     this.sessions.delete(workspaceId);
+  }
+
+  private async discardSession(session: BrowserSession): Promise<void> {
+    session.archived = true;
+    await this.cancelGesture(session);
+    for (const token of session.viewers.keys()) this.viewerSessions.delete(token);
+    session.viewers.clear();
+    session.controller = null;
+    if (this.sessions.get(session.workspaceId) === session)
+      this.sessions.delete(session.workspaceId);
   }
 
   async listOpenWorkspaceIds(): Promise<string[]> {
@@ -853,6 +872,11 @@ export class SessionManager {
         canGoBack: Boolean(state.canGoBack),
         canGoForward: Boolean(state.canGoForward),
         error: null,
+        notice:
+          typeof identity.displayNotice === "string"
+            ? boundedText(identity.displayNotice, 256)
+            : null,
+        runtimeLost: false,
         archived: false,
         gesture: null,
         inputGeneration: typeof state.inputGeneration === "string" ? state.inputGeneration : null,
@@ -869,7 +893,11 @@ export class SessionManager {
     input: JsonValue,
   ): Promise<JsonValue> {
     if (session.archived) throw new Error("Workspace was archived");
-    return this.client.requestWorkspace(session.workspaceId, operation, input);
+    return this.client.requestWorkspace(session.workspaceId, operation, input).catch((error) => {
+      if (error instanceof RuntimeProtocolError && error.code === "RUNTIME_LOST")
+        session.runtimeLost = true;
+      throw error;
+    });
   }
 
   private requireViewer(token: string): BrowserSession {
@@ -1213,6 +1241,7 @@ export class SessionManager {
       controllerExpiresAt: controller ? new Date(controller.expiresAt).toISOString() : null,
       viewerCount: session.viewers.size,
       error: session.error,
+      ...(session.notice ? { notice: session.notice } : {}),
     };
   }
 }

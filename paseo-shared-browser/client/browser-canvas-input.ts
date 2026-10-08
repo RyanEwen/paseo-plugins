@@ -16,6 +16,14 @@ export interface CanvasInputOptions {
   onPoint(point: BrowserGesturePoint): void;
   onActivity(active: boolean): void;
 }
+/** Live canvas input needs a current frame and no mutation or modal surface that owns the keyboard/pointer. */
+export function liveInputAllowed(state: {
+  canSendInput: boolean;
+  mutationPending: boolean;
+  modalOpen: boolean;
+}): boolean {
+  return state.canSendInput && !state.mutationPending && !state.modalOpen;
+}
 const MAX_SCROLL_DELTA = 4_000;
 
 /** Preserve wheel distance by splitting oversized deltas instead of clipping it. */

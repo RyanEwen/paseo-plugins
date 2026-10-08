@@ -26,6 +26,8 @@ import {
 import { useBrowserNativeKeyboard } from "./use-browser-native-keyboard";
 import { type BrowserCanvasNode, bindBrowserCanvasWeb, setBrowserCanvasCursor } from "./web";
 
+const MAX_INSERT_TEXT = 16_000;
+
 interface CanvasOptions {
   authority(): BrowserGestureAuthority | null;
   transport: BrowserGestureTransport;
@@ -228,6 +230,27 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
     clearIdle();
     idleTimer.current = setTimeout(() => queue.finish(), 1_000);
   }, [queue]);
+  /** Explicit human-committed text (optionally followed by Enter) through the validated keyboard queue. */
+  const insertText = useCallback(
+    (text: string, submit = false): boolean => {
+      if (!alive.current || !current.current.enabled || !text) return false;
+      if (text.length > MAX_INSERT_TEXT) {
+        current.current.onError(
+          new Error(`Text is too long. Send up to ${MAX_INSERT_TEXT} characters at once.`),
+        );
+        return false;
+      }
+      if (!enqueueKeyboard({ kind: "text", text })) return false;
+      if (submit) {
+        const key = { key: "Enter", code: "Enter", modifiers: 0, repeat: false } as const;
+        if (enqueueKeyboard({ kind: "key", type: "down", ...key }))
+          enqueueKeyboard({ kind: "key", type: "up", ...key });
+      }
+      finishKeyboard();
+      return true;
+    },
+    [enqueueKeyboard, finishKeyboard],
+  );
   const nativeKeyboard = useBrowserNativeKeyboard({
     enabled: () => alive.current && current.current.enabled,
     ownershipKey: options.ownershipKey,
@@ -344,5 +367,6 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
     panHandlers: Platform.OS === "web" ? {} : panResponder.panHandlers,
     cancel: input.cancel,
     nativeKeyboard,
+    insertText,
   };
 }

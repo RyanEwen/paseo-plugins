@@ -152,4 +152,40 @@ describe("ComposeTextControls", () => {
     stale();
     expect(composeText).not.toHaveBeenCalled();
   });
+
+  it("keeps every character of input that arrives faster than a re-render, and never echoes a value back", () => {
+    render({ request: { id: 1, ownershipKey: "page-1" } });
+    const field = find(tree, (p) => "onChangeText" in p);
+    expect("value" in field).toBe(false);
+    // One retained handler, no render between events: the host input owns the text.
+    const change = field.onChangeText as (t: string) => void;
+    for (const next of ["h", "he", "hel", "hell", "hello", "hello日", "hello日本"]) change(next);
+    render();
+    (done().onPress as () => void)();
+    expect(composeText).toHaveBeenCalledTimes(1);
+    expect(composeText).toHaveBeenCalledWith("hello日本");
+  });
+
+  it("commits ten rapid characters and an IME-style whole-string replacement exactly", () => {
+    render({ request: { id: 1, ownershipKey: "page-1" } });
+    const change = find(tree, (p) => "onChangeText" in p).onChangeText as (t: string) => void;
+    for (let i = 1; i <= 10; i++) change("abcdefghij".slice(0, i));
+    change("にほんご"); // composition commit replaces the whole value
+    render();
+    (done().onPress as () => void)();
+    expect(composeText).toHaveBeenCalledWith("にほんご");
+  });
+
+  it("clears the draft on close and reopen, and ignores a retained handler from the old draft", () => {
+    render({ request: { id: 1, ownershipKey: "page-1" } });
+    const retained = find(tree, (p) => "onChangeText" in p).onChangeText as (t: string) => void;
+    retained("old draft");
+    render();
+    (find(tree, (p) => p.label === "Cancel").onPress as () => void)();
+    retained("late old text");
+    render({ request: { id: 2, ownershipKey: "page-1" } });
+    expect(done().disabled).toBe(true);
+    (done().onPress as () => void)();
+    expect(composeText).not.toHaveBeenCalled();
+  });
 });

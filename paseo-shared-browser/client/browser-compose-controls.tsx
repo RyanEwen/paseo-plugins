@@ -35,7 +35,20 @@ export function ComposeTextControls({
 }) {
   const handledRequest = useRef<number | null>(null);
   const [composeOpen, setComposeOpen] = useState(false);
-  const [draft, setDraft] = useState("");
+  // The input is host-owned (uncontrolled): echoing every character back through
+  // React state let a fast second keystroke be overwritten by a stale value.
+  // Latest text is kept here; state changes only when emptiness flips or the draft resets.
+  const text = useRef("");
+  const generation = useRef(0);
+  const [hasText, setHasText] = useState(false);
+  const [inputKey, setInputKey] = useState(0);
+  const draftGeneration = generation.current;
+  const resetDraft = () => {
+    generation.current += 1;
+    text.current = "";
+    setHasText(false);
+    setInputKey(generation.current);
+  };
   const live = useRef({ enabled, ownershipKey, composeText, cancelInput });
   live.current = { enabled, ownershipKey, composeText, cancelInput };
   const [session] = useState(() =>
@@ -48,15 +61,16 @@ export function ComposeTextControls({
   const canCommit = enabled && session.owner() === ownershipKey;
   const closeCompose = () => {
     setComposeOpen(false);
-    setDraft("");
+    resetDraft();
     session.close();
   };
   const openCompose = () => {
+    resetDraft();
     session.open();
     setComposeOpen(true);
   };
   const commit = () => {
-    if (session.commit(draft)) closeCompose();
+    if (session.commit(text.current)) closeCompose();
   };
   useEffect(() => {
     if (!request || handledRequest.current === request.id) return;
@@ -81,10 +95,16 @@ export function ComposeTextControls({
           <TextInput
             autoFocus
             multiline
-            value={draft}
+            key={inputKey}
+            defaultValue=""
             maxLength={16_000}
             accessibilityLabel="Text to compose"
-            onChangeText={setDraft}
+            onChangeText={(next) => {
+              // A callback retained from a closed or replaced draft must not write into the new one.
+              if (generation.current !== draftGeneration) return;
+              text.current = next;
+              setHasText(next.length > 0);
+            }}
             style={[styles.field, { minHeight: 100 }]}
           />
           {!canCommit ? (
@@ -99,7 +119,7 @@ export function ComposeTextControls({
               theme={theme}
               label="Done"
               primary
-              disabled={!canCommit || !draft}
+              disabled={!canCommit || !hasText}
               onPress={commit}
             />
           </View>

@@ -546,8 +546,10 @@ export class SessionManager {
               };
               session.videoReceipts.set(receipt, { frame, capturedAtMonotonicMs });
             }
-            this.rememberFrame(session, frame, capturedAtMonotonicMs);
-            packets.push({ ...packet, frame });
+            // False when input revoked this capture's time: it may still be painted,
+            // but it can never authorize a press, and the viewer must not try.
+            const actionable = this.rememberFrame(session, frame, capturedAtMonotonicMs);
+            packets.push({ ...packet, frame, actionable });
           }
         }
         while (session.videoReceipts.size > MAX_RECENT_FRAMES) {
@@ -1461,12 +1463,12 @@ export class SessionManager {
     session: BrowserSession,
     frame: BrowserFrameAuthority,
     capturedAtMonotonicMs?: number,
-  ): void {
+  ): boolean {
     if (capturedAtMonotonicMs !== undefined && session.videoInputNotBefore !== null) {
       const exclusiveFloor = session.videoInputNotBefore + VIDEO_SOURCE_CLOCK_TOLERANCE_MS;
       if (!Number.isFinite(capturedAtMonotonicMs) || capturedAtMonotonicMs <= exclusiveFloor) {
         session.recentFrames.delete(frame.frameId);
-        return;
+        return false;
       }
     }
     this.pruneRecentFrames(session);
@@ -1485,6 +1487,7 @@ export class SessionManager {
       if (!oldest) break;
       session.recentFrames.delete(oldest);
     }
+    return session.recentFrames.has(frame.frameId);
   }
 
   /**

@@ -52,6 +52,13 @@ interface QueueOptions {
   onFinish(): void;
   /** Reset local held contacts after an acknowledged navigation, without cancelling this queue again. */
   onNavigationComplete?(): void;
+  /**
+   * Called after the host acknowledges a non-hover event. Receipts decoded from
+   * anything requested before this point predate the input's effect, so the viewer
+   * must stop treating them as actionable even if they were requested after the
+   * local press began.
+   */
+  onAcknowledged?(): void;
   /** Resolves only after a different actionable decoded receipt commits, never visual-only pixels or a timer. */
   waitForFrame?(afterFrameId: string, maxWaitMs?: number): Promise<void>;
 }
@@ -340,7 +347,9 @@ export function createBrowserInputQueue(options: QueueOptions) {
           // actionable authority until the next frame paints; JPEG keeps the spent
           // frame visible. Both mean this press needs a newer decoded receipt.
           const visibleId = fresh?.target.frameId ?? owned.authority.target.frameId;
-          const spent = invalidatedFrameId === visibleId;
+          const spent = fresh
+            ? invalidatedFrameId === fresh.target.frameId
+            : invalidatedFrameId !== null;
           if (spent && options.waitForFrame) {
             // Wait a bounded time; elapsed time alone never admits a press, and the
             // server refuses a spent or expired receipt regardless.
@@ -371,10 +380,10 @@ export function createBrowserInputQueue(options: QueueOptions) {
         if (command.event.kind === "down") owned.heldButtons.add(command.event.button);
         if (command.event.kind === "up") owned.heldButtons.delete(command.event.button);
         // Mirror the server: everything except hover revokes the visible receipt.
-        if (
+        const revokesReceipts =
           (command.event.kind !== "move" && command.event.kind !== "leave") ||
-          owned.heldButtons.size > 0
-        ) {
+          owned.heldButtons.size > 0;
+        if (revokesReceipts) {
           invalidatedFrameId =
             options.authority()?.target.frameId ?? owned.authority.target.frameId;
         }
@@ -417,6 +426,7 @@ export function createBrowserInputQueue(options: QueueOptions) {
         if (!sameAuthority(owned.authority, currentControl())) {
           throw new Error("Browser input context changed. Release the gesture and try again.");
         }
+        if (revokesReceipts) options.onAcknowledged?.();
         options.onCursor(result.cursor);
       }
     } catch (error) {

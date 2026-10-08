@@ -59,6 +59,7 @@ function fixture(
   const errors: unknown[] = [];
   const cursors: unknown[] = [];
   const navigationCompleted: boolean[] = [];
+  const acknowledgements: string[] = [];
   const states: BrowserState[] = [];
   let projectState: ((state: BrowserState) => void) | null = null;
   let finished = 0;
@@ -93,6 +94,7 @@ function fixture(
       finished += 1;
     },
     onNavigationComplete: () => navigationCompleted.push(true),
+    onAcknowledged: () => acknowledgements.push("ack"),
     ...(waitForFrame ? { waitForFrame } : {}),
   });
   return {
@@ -104,6 +106,7 @@ function fixture(
     beginGate,
     transport,
     navigationCompleted,
+    acknowledgements,
     states,
     finishes: () => finished,
     projectState(callback: (state: BrowserState) => void) {
@@ -1030,6 +1033,27 @@ it.each(["viewer", "controller", "session", "runtime", "bridge", "document", "vi
     expect(f.sent).toHaveLength(1);
   },
 );
+
+it("reports host acknowledgement of every receipt-revoking input, never plain hover", async () => {
+  const f = fixture(undefined, true);
+  f.queue.enqueue(move(1));
+  f.beginGate.resolve({ state, gestureId: "opaque", nextSequence: 1 });
+  await flush();
+  f.queue.enqueue(move(2));
+  await flush();
+  expect(f.acknowledgements).toEqual([]);
+  f.queue.enqueue({ kind: "down", button: "left", point: point(2), clickCount: 1 });
+  await flush();
+  expect(f.acknowledgements).toEqual(["ack"]);
+  f.queue.enqueue(move(3)); // a held drag keeps revoking
+  f.queue.enqueue({ kind: "up", button: "left", point: point(3), clickCount: 1 });
+  await flush();
+  expect(f.acknowledgements).toHaveLength(3);
+  f.queue.enqueue({ kind: "scroll", point: point(3), deltaX: 0, deltaY: 5 });
+  await flush();
+  expect(f.acknowledgements).toHaveLength(4);
+  f.queue.cancel();
+});
 
 it("waits for the next decoded frame when video revoked its receipt, then presses with that frame", async () => {
   // Video input authority disappears (null) right after an acknowledged press and

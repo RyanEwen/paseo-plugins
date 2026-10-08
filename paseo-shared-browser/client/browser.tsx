@@ -363,6 +363,7 @@ export function SharedBrowserPanel({
     epoch: () => inputLifecycle.epoch,
     viewport: () => stateRef.current?.viewport ?? null,
     isCurrent: (packet, epoch) =>
+      packet.actionable !== false &&
       mountedRef.current &&
       activeViewerTokenRef.current === viewerToken &&
       epoch === inputLifecycle.epoch &&
@@ -797,6 +798,11 @@ export function SharedBrowserPanel({
       lastPointRef.current = { x: point.x, y: point.y };
     },
     onActivity: setActiveInput,
+    onInputAcknowledged: () => {
+      // Pixels requested before the host acknowledged this input cannot authorize
+      // the next press, even when their request began after the local press.
+      inputLifecycle.bump();
+    },
     onInputBoundary: () => {
       inputLifecycle.bump();
     },

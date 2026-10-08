@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rm } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -15,7 +16,12 @@ import {
   listPageTargets,
 } from "./cdp";
 import { readJpegFrameDimensions } from "./jpeg-frame";
-import { type ProcessIdentity, readProcessIdentity } from "./process-identity";
+import {
+  type ProcessIdentity,
+  processExists,
+  RUNTIME_OWNER_VARIABLE,
+  readProcessIdentity,
+} from "./process-identity";
 
 export { readJpegFrameDimensions as jpegDimensions } from "./jpeg-frame";
 
@@ -153,7 +159,8 @@ function requireAbsolute(path: string, label: string): string {
 
 function runtimeEnvironment(
   ipcDirectory: string,
-  launchEnvironment?: Readonly<Record<string, string>>,
+  launchEnvironment: Readonly<Record<string, string>> | undefined,
+  ownerNonce: string,
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const key of [
@@ -203,6 +210,7 @@ function runtimeEnvironment(
     // A private X11 display must not inherit an unrelated host Wayland session.
     delete environment.WAYLAND_DISPLAY;
   }
+  environment[RUNTIME_OWNER_VARIABLE] = ownerNonce;
   environment.AGENT_BROWSER_SOCKET_DIR = ipcDirectory;
   environment.AGENT_BROWSER_IDLE_TIMEOUT_MS = "0";
   environment.AGENT_BROWSER_STREAM_PORT = "0";
@@ -243,7 +251,8 @@ export class AgentBrowserRuntime {
   private readonly headed: boolean;
   private readonly timeoutMs: number;
   private readonly environment: NodeJS.ProcessEnv;
-  private daemon: ProcessIdentity | null = null;
+  private daemon: { pid: number; identity: ProcessIdentity | null } | null = null;
+  private readonly ownerNonce = randomUUID();
   private readonly daemonExitWaitMs: number;
   private connection: CdpConnection | null = null;
   private page: CdpSession | null = null;
@@ -288,7 +297,11 @@ export class AgentBrowserRuntime {
     this.headed = options.headed ?? false;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.daemonExitWaitMs = options.daemonExitWaitMs ?? DAEMON_EXIT_WAIT_MS;
-    this.environment = runtimeEnvironment(this.ipcDirectory, options.launchEnvironment);
+    this.environment = runtimeEnvironment(
+      this.ipcDirectory,
+      options.launchEnvironment,
+      this.ownerNonce,
+    );
     this.initialUrl = options.initialUrl ?? "about:blank";
   }
 
@@ -1184,20 +1197,25 @@ export class AgentBrowserRuntime {
     this.invalidateScreencastFrame();
   }
 
-  /** Records this runtime's own daemon so later signals never trust the PID file alone. */
+  /**
+   * Records the PID-file daemon. Only a PID whose environment carries this runtime's own
+   * nonce gets a verified identity; anything else is observable but never signalled.
+   */
   private async captureDaemon(): Promise<void> {
     const pid = await this.daemonPid();
-    this.daemon = pid === null ? null : await readProcessIdentity(pid, this.binaryPath);
+    this.daemon =
+      pid === null ? null : { pid, identity: await readProcessIdentity(pid, this.ownerNonce) };
   }
 
   private async daemonRunning(): Promise<boolean> {
     const daemon = this.daemon;
     if (!daemon) return false;
-    const current = await readProcessIdentity(daemon.pid, this.binaryPath);
-    return current?.startTicks === daemon.startTicks;
+    if (!daemon.identity) return processExists(daemon.pid);
+    const current = await readProcessIdentity(daemon.pid, this.ownerNonce);
+    return current?.startTicks === daemon.identity.startTicks;
   }
 
-  /** True once the captured daemon is gone (or its PID was recycled); bounded observation. */
+  /** True once the recorded daemon is gone (or its verified PID was recycled); bounded observation. */
   private async daemonExited(): Promise<boolean> {
     for (const deadline = Date.now() + this.daemonExitWaitMs; Date.now() < deadline; ) {
       if (!(await this.daemonRunning())) return true;
@@ -1206,17 +1224,20 @@ export class AgentBrowserRuntime {
     return !(await this.daemonRunning());
   }
 
-  /** Signals only a still-matching owned daemon, then confirms it exited before returning. */
+  /** Signals only a still-matching verified daemon, then confirms it exited before returning. */
   private async terminateDaemon(): Promise<void> {
     const daemon = this.daemon;
     if (daemon && (await this.daemonRunning())) {
-      try {
-        process.kill(daemon.pid, "SIGKILL");
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      if (daemon.identity) {
+        try {
+          process.kill(daemon.pid, "SIGKILL");
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        }
       }
+      // An unverified daemon is never signalled; exit must still be observed.
       if (!(await this.daemonExited()))
-        throw new AgentBrowserUnavailableError("agent-browser daemon did not exit");
+        throw new AgentBrowserUnavailableError("agent-browser daemon exit was not confirmed");
     }
     this.daemon = null;
   }

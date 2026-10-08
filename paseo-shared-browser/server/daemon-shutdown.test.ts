@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentBrowserRuntime } from "./agent-browser-runtime";
+import { RUNTIME_OWNER_VARIABLE } from "./process-identity";
 
 const cli = vi.hoisted(() => ({ onClose: null as null | (() => void), closes: 0 }));
 vi.mock("node:child_process", async (importOriginal) => ({
@@ -35,9 +36,12 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-/** A harmless process this test owns; the runtime's binary is this same executable. */
-async function ownChild(): Promise<ChildProcess> {
-  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+/** A harmless process this test owns; `nonce` makes it descend from the runtime's own launch. */
+async function ownChild(nonce?: string): Promise<ChildProcess> {
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+    env: nonce ? { ...process.env, [RUNTIME_OWNER_VARIABLE]: nonce } : process.env,
+  });
   children.push(child);
   await new Promise((resolve) => child.once("spawn", resolve));
   return child;
@@ -71,8 +75,9 @@ async function fixture(waitMs = 400) {
     daemonExitWaitMs: waitMs,
   });
   const native = runtime as unknown as {
+    ownerNonce: string;
     captureDaemon(): Promise<void>;
-    daemon: { pid: number; startTicks: string } | null;
+    daemon: { pid: number; identity: { pid: number; startTicks: string } | null } | null;
   };
   const recordPid = async (pid: number) => {
     await mkdir(profile, { recursive: true });
@@ -86,9 +91,9 @@ async function fixture(waitMs = 400) {
 describe.skipIf(process.platform !== "linux")("owned daemon shutdown", () => {
   it("waits for the acknowledged close to finish the daemon without signalling it, preserving the profile", async () => {
     const f = await fixture();
-    const daemon = await ownChild();
+    const daemon = await ownChild(f.native.ownerNonce);
     await f.recordPid(daemon.pid as number);
-    expect(f.native.daemon?.pid).toBe(daemon.pid);
+    expect(f.native.daemon?.identity?.pid).toBe(daemon.pid);
     const kill = vi.spyOn(process, "kill");
     cli.onClose = () => void setTimeout(() => daemon.kill("SIGTERM"), 100);
     await f.runtime.shutdown();
@@ -100,7 +105,7 @@ describe.skipIf(process.platform !== "linux")("owned daemon shutdown", () => {
 
   it("force-terminates a daemon that outlives the bounded wait and confirms exit before returning", async () => {
     const f = await fixture(200);
-    const daemon = await ownChild();
+    const daemon = await ownChild(f.native.ownerNonce);
     await f.recordPid(daemon.pid as number);
     await f.runtime.shutdown();
     // exit was confirmed before shutdown returned; the OS only has to deliver the status
@@ -112,46 +117,69 @@ describe.skipIf(process.platform !== "linux")("owned daemon shutdown", () => {
 
   it("fails shutdown instead of reporting success when a signalled daemon does not exit", async () => {
     const f = await fixture(200);
-    const daemon = await ownChild();
+    const daemon = await ownChild(f.native.ownerNonce);
     await f.recordPid(daemon.pid as number);
     const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
-    await expect(f.runtime.shutdown(true)).rejects.toThrow("did not exit");
+    await expect(f.runtime.shutdown(true)).rejects.toThrow("not confirmed");
     expect(kill).toHaveBeenCalledWith(daemon.pid, "SIGKILL");
     expect(daemon.pid && alive(daemon.pid)).toBe(true);
   });
 
-  it("never signals a process whose identity no longer matches the recorded daemon", async () => {
+  it("never signals a verified PID that was recycled after capture", async () => {
     const f = await fixture(200);
-    const recorded = await ownChild();
+    const recorded = await ownChild(f.native.ownerNonce);
     await f.recordPid(recorded.pid as number);
-    // The recorded daemon is gone and its PID now names an unrelated live process.
-    const bystander = await ownChild();
-    await writeFile(join(f.ipc, "owned.pid"), String(bystander.pid));
-    f.native.daemon = { pid: bystander.pid as number, startTicks: "1" };
+    const identity = f.native.daemon?.identity;
+    expect(identity).toBeTruthy();
+    // Same PID, different birth: the recorded start time no longer matches.
+    f.native.daemon = {
+      pid: recorded.pid as number,
+      identity: { ...(identity as { pid: number; startTicks: string }), startTicks: "1" },
+    };
     const kill = vi.spyOn(process, "kill");
     await f.runtime.shutdown(true);
-    expect(kill).not.toHaveBeenCalledWith(bystander.pid, "SIGKILL");
-    expect(bystander.pid && alive(bystander.pid)).toBe(true);
+    expect(kill).not.toHaveBeenCalledWith(recorded.pid, "SIGKILL");
+    expect(recorded.pid && alive(recorded.pid)).toBe(true);
   });
 
-  it("does not take authority from a PID file when no daemon identity was captured", async () => {
+  it("does not own a same-executable process from another session named by the PID file", async () => {
     const f = await fixture(200);
-    const bystander = await ownChild();
-    // Missing PID file at capture time, then a file naming a live unrelated process.
-    await f.native.captureDaemon();
-    expect(f.native.daemon).toBeNull();
-    await writeFile(join(f.ipc, "owned.pid"), String(bystander.pid));
+    // Same executable as the runtime's own children, but not launched by this runtime.
+    const otherSession = await ownChild();
+    await f.recordPid(otherSession.pid as number);
+    expect(f.native.daemon?.identity).toBeNull();
     const kill = vi.spyOn(process, "kill");
-    await f.runtime.shutdown(true);
-    expect(kill).not.toHaveBeenCalledWith(bystander.pid, "SIGKILL");
-    expect(bystander.pid && alive(bystander.pid)).toBe(true);
+    await expect(f.runtime.shutdown(true)).rejects.toThrow("not confirmed");
+    expect(kill).not.toHaveBeenCalledWith(otherSession.pid, "SIGKILL");
+    expect(otherSession.pid && alive(otherSession.pid)).toBe(true);
+  });
+});
+
+describe("unverifiable daemon identity (platforms without /proc, unowned PIDs)", () => {
+  it("accepts a graceful close once the recorded process is observed gone, without signalling", async () => {
+    const f = await fixture();
+    const daemon = await ownChild();
+    await f.recordPid(daemon.pid as number);
+    const kill = vi.spyOn(process, "kill");
+    cli.onClose = () => void setTimeout(() => daemon.kill("SIGTERM"), 100);
+    await f.runtime.shutdown();
+    expect(kill).not.toHaveBeenCalledWith(daemon.pid, "SIGKILL");
+    await expect(readFile(join(f.ipc, "owned.sock"))).rejects.toThrow();
   });
 
-  it("refuses to capture a PID whose executable is not the owned binary", async () => {
-    const f = await fixture();
-    await mkdir(f.ipc, { recursive: true });
-    await writeFile(join(f.ipc, "owned.pid"), "1");
+  it("neither signals nor reports success when the recorded process stays alive", async () => {
+    const f = await fixture(150);
+    const daemon = await ownChild();
+    await f.recordPid(daemon.pid as number);
+    const kill = vi.spyOn(process, "kill");
+    await expect(f.runtime.shutdown()).rejects.toThrow("not confirmed");
+    expect(kill).not.toHaveBeenCalledWith(daemon.pid, "SIGKILL");
+  });
+
+  it("has nothing to observe or signal without a PID record", async () => {
+    const f = await fixture(150);
     await f.native.captureDaemon();
     expect(f.native.daemon).toBeNull();
+    await expect(f.runtime.shutdown()).resolves.toBeUndefined();
   });
 });

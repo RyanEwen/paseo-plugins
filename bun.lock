@@ -189,6 +189,7 @@
       },
       "devDependencies": {
         "@biomejs/biome": "catalog:",
+        "@getpaseo/server": "catalog:",
         "@tanstack/react-query": "catalog:",
         "@types/node": "catalog:",
         "@types/react": "catalog:",

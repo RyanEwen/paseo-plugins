@@ -7,11 +7,10 @@ comparisons behind the input design.
 
 ## Transport and ownership
 
-Desktop, web and Android clients use Chromium tab capture, a realtime WebCodecs encoder,
+Desktop and web clients use Chromium tab capture, a realtime WebCodecs encoder,
 and bounded encoded-packet reads over authenticated Paseo RPC. The receiver
-decodes into a retained canvas. Android uses the host-owned `EncodedVideo` surface;
-its bridge acknowledges explicit canvas draws before input authority is admitted.
-Other native clients and clients without a usable decoder use JPEG. This is encoded video, not WebRTC or a push subscription; it
+decodes into a retained canvas. Native clients and clients without a usable decoder use JPEG
+(the host `EncodedVideo` plugin API is not in a published plugin SDK). This is encoded video, not WebRTC or a push subscription; it
 shares the reliable connection and relay used by Paseo.
 
 `server/native-video-extension.ts` materializes the immutable bundled capture

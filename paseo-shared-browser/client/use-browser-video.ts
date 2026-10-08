@@ -148,12 +148,7 @@ export function useBrowserVideo(options: BrowserVideoOptions) {
     let applicationActive = AppState.currentState == null || AppState.currentState === "active";
     const start = () => {
       videoGeneration.current += 1;
-      const target = createBrowserVideoEnvironment(node, () => {
-        // Native pixels may change before the bridge acknowledgement arrives.
-        // Revoke the old receipt before sending any asynchronous draw command.
-        authorityRevision.current += 1;
-        frontRef.current = null;
-      });
+      const target = createBrowserVideoEnvironment(node);
       if (!target) return null;
       let stopped = false;
       let readExhausted = false;
@@ -446,7 +441,6 @@ export function useBrowserVideo(options: BrowserVideoOptions) {
   return {
     active,
     canvasRef,
-    surfaceError: (error: unknown) => setFailure({ error, viewerToken: options.viewerToken }),
     front,
     frontViewport: presentation?.viewport ?? null,
     frontRef,

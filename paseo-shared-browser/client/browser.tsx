@@ -199,7 +199,6 @@ export function SharedBrowserPanel({
   host,
   layout,
   workspaceId,
-  active = true,
 }: PluginWorkspacePanelProps) {
   const queryClient = useQueryClient();
   const styles = useMemo(() => createStyles(theme, layout.compact), [theme, layout.compact]);
@@ -423,7 +422,7 @@ export function SharedBrowserPanel({
   const tabsQuery = useQuery({
     queryKey: tabsQueryKey,
     queryFn: () => listTabs({ viewerToken: viewerToken! }),
-    enabled: Boolean(viewerToken) && active,
+    enabled: Boolean(viewerToken),
     refetchInterval: 2_000,
   });
 
@@ -499,7 +498,6 @@ export function SharedBrowserPanel({
   }, [state?.sessionId, state?.viewportGeneration]);
 
   const video = useBrowserVideo({
-    active,
     viewerToken,
     quality: "high",
     bitrate: preferences.videoBitrate,
@@ -536,7 +534,7 @@ export function SharedBrowserPanel({
     refreshCapture,
     retryFrameCapture,
   } = useBrowserImageCapture({
-    active: active && (!video.supported || video.active),
+    active: !video.supported || video.active,
     viewerToken,
     quality: preferences.captureQuality,
     activeInput,
@@ -1236,8 +1234,7 @@ export function SharedBrowserPanel({
   useBrowserFillViewport({
     identity: mutationIdentity,
     enabled: fillViewportEnabled,
-    canResize:
-      active && canControl && !activeInput && !anyMutationPending && state?.status === "ready",
+    canResize: canControl && !activeInput && !anyMutationPending && state?.status === "ready",
     target: fillTarget,
     viewport: state?.viewport ?? null,
     apply: () => {
@@ -1252,7 +1249,6 @@ export function SharedBrowserPanel({
     identity: mutationIdentity,
     enabled: automaticDensityEnabled,
     canChange:
-      active &&
       canControl &&
       !activeInput &&
       !anyMutationPending &&
@@ -1764,7 +1760,6 @@ export function SharedBrowserPanel({
           {video.supported ? (
             <BrowserVideoSurface
               canvasRef={video.canvasRef}
-              onError={video.surfaceError}
               style={{
                 position: "absolute",
                 left: displayRect?.x ?? 0,

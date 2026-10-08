@@ -466,9 +466,14 @@ export class SessionManager {
     return this.serialize(session, async () => {
       this.requireMutationAccess(session, input);
       this.requireRecentFrame(session, input.target);
-      await this.cancelGesture(session);
-      await this.dispatchInput(session, input.event, input.target);
-      this.invalidateFrames(session);
+      try {
+        await this.cancelGesture(session);
+        await this.dispatchInput(session, input.event, input.target);
+      } finally {
+        // Admitted: whatever happened, including a partial or ordinary failure, the
+        // capture is spent. A caller must observe again before another attempt.
+        this.invalidateFrames(session);
+      }
       this.renewController(session, input.viewerToken);
       return { state: await this.snapshotState(session, input.viewerToken) };
     });

@@ -127,3 +127,40 @@ describe("agent input after autonomous navigation", () => {
     expect(insert?.input.gestureId).toBe(fixture.calls[begin]?.input.gestureId);
   });
 });
+
+describe("agent input capture consumption", () => {
+  it("spends the capture after a partially completed click fails with RUNTIME_FAILURE", async () => {
+    const fixture = await agentFixture();
+    fixture.failAfterDown();
+    await expect(fixture.request("input", { event: click })).rejects.toMatchObject({
+      code: "RUNTIME_FAILURE",
+    });
+    expect(fixture.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+    expect(fixture.calls.filter((call) => call.operation === "mouse.up")).toHaveLength(1);
+    await expect(fixture.request("input", { event: click })).rejects.toThrow();
+    expect(fixture.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+  });
+
+  it("keeps the capture when input is denied before admission", async () => {
+    const fixture = await agentFixture();
+    await fixture.request("release-control");
+    await expect(fixture.request("input", { event: click })).rejects.toMatchObject({
+      code: "AUTHENTICATION_FAILED",
+    });
+    await fixture.request("acquire-control");
+    await fixture.request("input", { event: click });
+    expect(fixture.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+  });
+
+  it("invalidates observations on an unknown publication outcome", async () => {
+    const fixture = await agentFixture();
+    fixture.unknownText();
+    await expect(
+      fixture.request("input", { event: { kind: "type", text: "once" } }),
+    ).rejects.toMatchObject({ code: "UNKNOWN_OUTCOME" });
+    await expect(
+      fixture.request("input", { event: { kind: "type", text: "once" } }),
+    ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+    expect(fixture.calls.filter((call) => call.operation === "text.insert")).toHaveLength(1);
+  });
+});

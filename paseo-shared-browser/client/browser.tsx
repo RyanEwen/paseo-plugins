@@ -1,23 +1,22 @@
+/**
+ * Workspace browser panel orchestration: viewer/control ownership, current
+ * decoded receipts, media handoff and menu actions. Native/DOM forwarding and
+ * presentation models live in focused counterpart hooks; this module never
+ * replays published mutations or substitutes visible pixels for input authority.
+ */
+import { type PluginWorkspacePanelProps, useRpc } from "@getpaseo/plugin/client";
+import { Icon, Modal } from "@getpaseo/plugin/client/react-native";
+import { useQuery } from "@tanstack/react-query";
 import {
-  type PluginClientContext,
-  type PluginWorkspacePanelProps,
-  useRpc,
-} from "@getpaseo/plugin/client";
-import { Icon, Modal, TextInput } from "@getpaseo/plugin/client/react-native";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  ActivityIndicator,
-  type LayoutChangeEvent,
-  Pressable,
-  type StyleProp,
-  StyleSheet,
-  Text,
-  type TextInputProps,
-  type TextStyle,
-  View,
-  type ViewStyle,
-} from "react-native";
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { type LayoutChangeEvent, Text, View } from "react-native";
 import {
   acquireControlRpc,
   applyDevicePresetRpc,
@@ -33,26 +32,32 @@ import {
   didBrowserRuntimeRestart,
   endBrowserGestureRpc,
   isBrowserStateCurrent,
-  listOpenBrowserWorkspacesRpc,
   MAX_VIEWPORT,
   MIN_VIEWPORT,
   navigateBrowserRpc,
   releaseControlRpc,
   resizeBrowserRpc,
   sendBrowserInputRpc,
+  setCaptureDensityRpc,
   updateBrowserGestureRpc,
 } from "../shared/browser";
+import type { BrowserFrameAuthority } from "../shared/browser-video";
 import { groupResolutionPresets } from "../shared/resolution-menu";
 import { liveInputAllowed } from "./browser-canvas-input";
 import { type BrowserCanvasDisplayMode, getBrowserCanvasLayout } from "./browser-canvas-layout";
 import { BrowserCanvasViewport } from "./browser-canvas-viewport";
-import { browserCaptureInterval } from "./browser-capture-cadence";
+import {
+  CanvasPlaceholder,
+  ChromeIconButton,
+  ControlButton,
+  ErrorNotice,
+  Field,
+} from "./browser-chrome";
 import { ComposeTextControls } from "./browser-compose-controls";
-import { ControlButton, type ControlButtonStyles } from "./browser-control-button";
-import { setBrowserControlTooltip } from "./browser-control-tooltip-web";
 import { type EmulationSelection, matchingResolutionPresetId } from "./browser-emulation-mode";
 import type { FrameCandidate } from "./browser-frame-buffer";
 import { BrowserFrameImage } from "./browser-frame-image";
+import { createStyles, DIMENSION, SPACE } from "./browser-panel-styles";
 import { BrowserResolutionPicker } from "./browser-resolution-picker";
 import {
   BrowserMenuHeading,
@@ -60,41 +65,26 @@ import {
   BrowserMenuSeparator,
   BrowserToolbarMenu,
 } from "./browser-toolbar-menu";
+import { BrowserVideoSurface } from "./browser-video-surface";
 import { isExpiredBrowserViewerError } from "./browser-viewer-recovery";
 import { createFrameLifecycle } from "./frame-lifecycle";
 import { useBrowserCanvasInput } from "./use-browser-canvas-input";
+import { useBrowserCaptureDensity } from "./use-browser-capture-density";
 import { useBrowserEmulationMode } from "./use-browser-emulation-mode";
 import { useBrowserFrameBuffer } from "./use-browser-frame-buffer";
+import { useBrowserImageCapture } from "./use-browser-image-capture";
+import { useBrowserScopedMutation } from "./use-browser-scoped-mutation";
+import { useBrowserVideo } from "./use-browser-video";
 import { useBrowserViewerRecovery } from "./use-browser-viewer-recovery";
 import { useResolutionFavorites } from "./use-resolution-favorites";
 
-const SPACE = {
-  xxs: 2,
-  xs: 4,
-  sm: 8,
-  md: 12,
-  lg: 16,
-} as const;
-const RADIUS = { sm: 6, md: 8, lg: 10 } as const;
-const TYPE = { caption: 11, body: 13, title: 14 } as const;
-const DIMENSION = {
-  control: 34,
-  touch: 44,
-  icon: 15,
-  addressRegular: 220,
-  canvasCompact: 220,
-  canvasRegular: 320,
-  helperMax: 420,
-  viewportField: 72,
-  screenRadius: 20,
-} as const;
+// Preserve the existing contribution entry/test import while ownership lives in a focused module.
+export { contributeSharedBrowserClient } from "./browser-client-presence";
+
 const MAX_VIEWER_LABEL_LENGTH = 64;
-const PILL_PRESENCE_POLL_MS = 2_000;
-const AGENT_DIRECTORY_PAGE_LIMIT = 200;
 const MAX_URL_LENGTH = 8_192;
 const BYTES_PER_KIBIBYTE = 1_024;
 
-type Theme = PluginWorkspacePanelProps["theme"];
 type SpecialKey = Extract<BrowserInputEvent, { kind: "key" }>["key"];
 
 interface Size {
@@ -142,706 +132,32 @@ function hasUnknownMutationOutcome(error: unknown): boolean {
   return dispatched && /(transport|connection|timeout)/.test(code || name.toLowerCase());
 }
 
-function isFrameCurrent(frame: BrowserFrame, state: BrowserState): boolean {
+/** A painted document may remain visible within the same source and geometry. */
+function isFrameDisplayCurrent(frame: BrowserFrameAuthority, state: BrowserState): boolean {
+  return Boolean(
+    frame.runtimeId &&
+      state.runtimeId &&
+      frame.captureEpoch !== undefined &&
+      state.bridgeEpoch !== undefined &&
+      frame.sessionId === state.sessionId &&
+      frame.runtimeId === state.runtimeId &&
+      frame.captureEpoch === state.bridgeEpoch &&
+      frame.viewportGeneration === state.viewportGeneration,
+  );
+}
+
+function isFrameCurrent(frame: BrowserFrameAuthority, state: BrowserState): boolean {
   return (
     frame.sessionId === state.sessionId &&
     (!frame.runtimeId || !state.runtimeId || frame.runtimeId === state.runtimeId) &&
+    (frame.captureEpoch === undefined ||
+      state.bridgeEpoch === undefined ||
+      frame.captureEpoch === state.bridgeEpoch) &&
     frame.navigationGeneration === state.navigationGeneration &&
     frame.viewportGeneration === state.viewportGeneration
   );
 }
 
-function createStyles(theme: Theme, compact: boolean) {
-  return StyleSheet.create({
-    screen: {
-      flex: 1,
-      minHeight: 0,
-      backgroundColor: theme.colors.surface0,
-    },
-    statusRow: {
-      minHeight: 30,
-      paddingHorizontal: SPACE.sm,
-      paddingVertical: SPACE.xxs,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: SPACE.sm,
-      borderBottomWidth: 1,
-      borderBottomColor: theme.colors.border,
-      backgroundColor: theme.colors.surface0,
-    },
-    statusSummary: {
-      minWidth: 0,
-      flex: 1,
-      flexDirection: "row",
-      alignItems: "center",
-      flexWrap: "wrap",
-      gap: SPACE.sm,
-    },
-    statusDot: {
-      width: SPACE.sm,
-      height: SPACE.sm,
-      borderRadius: RADIUS.sm,
-    },
-    statusText: {
-      color: theme.colors.foreground,
-      fontSize: TYPE.body,
-      fontWeight: "600",
-    },
-    mutedText: {
-      color: theme.colors.foregroundMuted,
-      fontSize: TYPE.caption,
-    },
-    controllerText: {
-      color: theme.colors.foregroundMuted,
-      fontSize: TYPE.caption,
-      flexShrink: 1,
-    },
-    actionRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: SPACE.xs,
-    },
-    chrome: {
-      minHeight: 40,
-      paddingHorizontal: SPACE.sm,
-      paddingVertical: SPACE.xs,
-      borderBottomWidth: 1,
-      borderBottomColor: theme.colors.border,
-      backgroundColor: theme.colors.surface0,
-    },
-    addressRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: SPACE.xs,
-    },
-    addressInput: {
-      flex: 1,
-      minWidth: compact ? 40 : DIMENSION.addressRegular,
-    },
-    chromeAddressInput: {
-      height: compact ? 34 : 28,
-      borderRadius: RADIUS.md,
-      backgroundColor: theme.colors.surface1,
-      // Compact chrome must override the themed input's form-sized padding.
-      // Keep a full text line even on native hosts with their own font padding.
-      paddingVertical: 0,
-      paddingHorizontal: SPACE.xs,
-      fontSize: TYPE.body,
-      lineHeight: 18,
-      includeFontPadding: false,
-      textAlignVertical: "center",
-    },
-    chromeIconButton: {
-      width: 28,
-      height: 28,
-      borderRadius: RADIUS.md,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    chromeIconButtonHovered: {
-      backgroundColor: theme.colors.surface2,
-    },
-    chromeIconButtonPressed: {
-      opacity: 0.72,
-    },
-    chromeIconButtonDisabled: {
-      opacity: 0.45,
-    },
-
-    button: {
-      minHeight: DIMENSION.control,
-      minWidth: DIMENSION.control,
-      paddingHorizontal: SPACE.sm,
-      borderWidth: 1,
-      borderColor: theme.colors.border,
-      borderRadius: RADIUS.sm,
-      backgroundColor: theme.colors.surface2,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: SPACE.xs,
-    },
-    buttonSelected: {
-      borderColor: theme.colors.accent,
-      backgroundColor: theme.colors.accent,
-    },
-    buttonPrimary: {
-      borderColor: theme.colors.accent,
-      backgroundColor: theme.colors.accent,
-    },
-    buttonDanger: {
-      borderColor: theme.colors.statusWarning,
-    },
-    buttonHovered: {
-      borderColor: theme.colors.foregroundMuted,
-    },
-    buttonPressed: {
-      opacity: 0.72,
-    },
-    buttonFocused: {
-      borderColor: theme.colors.accent,
-      borderWidth: 2,
-    },
-    buttonDisabled: {
-      opacity: 0.42,
-    },
-    buttonText: {
-      color: theme.colors.foreground,
-      fontSize: TYPE.caption,
-      fontWeight: "600",
-    },
-    buttonTextSelected: {
-      color: theme.colors.accentForeground,
-    },
-    field: {
-      height: DIMENSION.control,
-      paddingHorizontal: SPACE.sm,
-      borderWidth: 1,
-      borderColor: theme.colors.border,
-      borderRadius: RADIUS.sm,
-      color: theme.colors.foreground,
-      backgroundColor: theme.colors.surface2,
-      fontSize: TYPE.body,
-    },
-    fieldFocused: {
-      borderColor: theme.colors.accent,
-      borderWidth: 2,
-    },
-    fieldDisabled: {
-      opacity: 0.5,
-    },
-    errorRow: {
-      paddingHorizontal: SPACE.sm,
-      paddingVertical: SPACE.xs,
-      borderLeftWidth: SPACE.xs,
-      borderLeftColor: theme.colors.statusDanger,
-      backgroundColor: theme.colors.surface1,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: SPACE.sm,
-    },
-    errorText: {
-      flex: 1,
-      color: theme.colors.statusDanger,
-      fontSize: TYPE.caption,
-    },
-    canvasShell: {
-      flex: 1,
-      minHeight: compact ? DIMENSION.canvasCompact : DIMENSION.canvasRegular,
-      minWidth: 0,
-      margin: compact ? SPACE.sm : 0,
-      borderRadius: compact ? DIMENSION.screenRadius : 0,
-      overflow: "hidden",
-      backgroundColor: theme.colors.surface1,
-    },
-    canvas: {
-      flex: 1,
-      minHeight: 0,
-      overflow: "hidden",
-    },
-    interactionLayer: {
-      position: "absolute",
-    },
-    canvasState: {
-      flex: 1,
-      alignItems: "center",
-      justifyContent: "center",
-      padding: SPACE.lg,
-      gap: SPACE.sm,
-    },
-    canvasTitle: {
-      color: theme.colors.foreground,
-      fontSize: TYPE.title,
-      fontWeight: "600",
-      textAlign: "center",
-    },
-    canvasDetail: {
-      color: theme.colors.foregroundMuted,
-      fontSize: TYPE.caption,
-      textAlign: "center",
-      maxWidth: DIMENSION.helperMax,
-    },
-    canvasFooter: {
-      minHeight: DIMENSION.control,
-      paddingHorizontal: SPACE.sm,
-      borderTopWidth: 1,
-      borderTopColor: theme.colors.border,
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: SPACE.sm,
-      backgroundColor: theme.colors.surface1,
-    },
-    canvasFooterText: {
-      color: theme.colors.foregroundMuted,
-      fontSize: TYPE.caption,
-      flexShrink: 1,
-    },
-
-    mobileRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: SPACE.sm,
-    },
-    sheetContent: {
-      gap: SPACE.md,
-      padding: SPACE.sm,
-    },
-    sheetGrid: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: SPACE.sm,
-    },
-    controlStrip: {
-      minHeight: DIMENSION.control,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: SPACE.xs,
-    },
-    stripLabel: {
-      color: theme.colors.foregroundMuted,
-      fontSize: TYPE.caption,
-      fontWeight: "600",
-      marginRight: SPACE.xs,
-    },
-    viewportField: {
-      width: DIMENSION.viewportField,
-      textAlign: "center",
-    },
-    multiply: {
-      color: theme.colors.foregroundMuted,
-      fontSize: TYPE.body,
-    },
-
-    deviceModalContent: {
-      gap: SPACE.sm,
-      padding: SPACE.sm,
-    },
-    devicePresetRow: {
-      minHeight: 46,
-      paddingHorizontal: SPACE.md,
-      paddingVertical: SPACE.sm,
-      borderWidth: 1,
-      borderColor: theme.colors.border,
-      borderRadius: RADIUS.md,
-      backgroundColor: theme.colors.surface1,
-      flexDirection: "row",
-      alignItems: "center",
-      gap: SPACE.sm,
-    },
-    devicePresetRowSelected: {
-      borderColor: theme.colors.accent,
-      backgroundColor: theme.colors.surface2,
-    },
-    devicePresetText: {
-      flex: 1,
-      color: theme.colors.foreground,
-      fontSize: TYPE.body,
-      fontWeight: "600",
-    },
-    devicePresetDetail: {
-      color: theme.colors.foregroundMuted,
-      fontSize: TYPE.caption,
-    },
-    customViewportRow: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: SPACE.xs,
-    },
-    buttonLarge: {
-      minHeight: DIMENSION.touch,
-      paddingHorizontal: SPACE.md,
-      borderRadius: RADIUS.md,
-    },
-    buttonFill: {
-      flex: 1,
-    },
-  });
-}
-
-interface FieldStyles {
-  field: TextStyle;
-  fieldFocused: TextStyle;
-  fieldDisabled: TextStyle;
-}
-
-interface ErrorNoticeStyles extends ControlButtonStyles {
-  errorRow: ViewStyle;
-  errorText: TextStyle;
-}
-
-interface CanvasPlaceholderStyles {
-  canvasState: ViewStyle;
-  canvasTitle: TextStyle;
-  canvasDetail: TextStyle;
-}
-
-interface ChromeIconButtonStyles {
-  chromeIconButton: ViewStyle;
-  chromeIconButtonHovered: ViewStyle;
-  chromeIconButtonPressed: ViewStyle;
-  chromeIconButtonDisabled: ViewStyle;
-}
-
-function ChromeIconButton({
-  styles,
-  theme,
-  label,
-  icon,
-  iconNode,
-  selected = false,
-  expanded,
-  disabled = false,
-  onPress,
-}: {
-  styles: ChromeIconButtonStyles;
-  theme: Theme;
-  label: string;
-  icon: string;
-  iconNode?: ReactNode;
-  expanded?: boolean;
-  selected?: boolean;
-  disabled?: boolean;
-  onPress(): void;
-}) {
-  const [hovered, setHovered] = useState(false);
-  const tooltipRef = useCallback((node: unknown) => setBrowserControlTooltip(node, label), [label]);
-  return (
-    <Pressable
-      ref={tooltipRef}
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ disabled, selected, ...(expanded === undefined ? {} : { expanded }) }}
-      disabled={disabled}
-      onHoverIn={() => setHovered(true)}
-      onHoverOut={() => setHovered(false)}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.chromeIconButton,
-        hovered ? styles.chromeIconButtonHovered : null,
-        pressed ? styles.chromeIconButtonPressed : null,
-        disabled ? styles.chromeIconButtonDisabled : null,
-      ]}
-    >
-      {iconNode ?? (
-        <Icon
-          name={icon}
-          size={16}
-          color={selected ? theme.colors.accent : theme.colors.foregroundMuted}
-        />
-      )}
-    </Pressable>
-  );
-}
-
-interface FieldProps {
-  styles: FieldStyles;
-  theme: Theme;
-  value: string;
-  accessibilityLabel: string;
-  placeholder?: string;
-  editable?: boolean;
-  /** Read-only information can stay legible without implying it is editable. */
-  dimWhenReadOnly?: boolean;
-  maxLength?: number;
-  keyboardType?: TextInputProps["keyboardType"];
-  inputMode?: TextInputProps["inputMode"];
-  returnKeyType?: TextInputProps["returnKeyType"];
-  selectTextOnFocus?: boolean;
-  style?: StyleProp<TextStyle>;
-  onChangeText(value: string): void;
-  onSubmit?(): void;
-  onFocus?(): void;
-  onBlur?(): void;
-}
-
-function Field({
-  styles,
-  theme,
-  value,
-  accessibilityLabel,
-  placeholder,
-  editable = true,
-  dimWhenReadOnly = true,
-  maxLength,
-  keyboardType,
-  inputMode,
-  returnKeyType,
-  selectTextOnFocus,
-  style,
-  onChangeText,
-  onSubmit,
-  onFocus,
-  onBlur,
-}: FieldProps) {
-  const [focused, setFocused] = useState(false);
-  return (
-    <TextInput
-      accessibilityLabel={accessibilityLabel}
-      autoCapitalize="none"
-      autoCorrect={false}
-      spellCheck={false}
-      editable={editable}
-      keyboardType={keyboardType}
-      inputMode={inputMode}
-      maxLength={maxLength}
-      onBlur={() => {
-        setFocused(false);
-        onBlur?.();
-      }}
-      onChangeText={onChangeText}
-      onFocus={() => {
-        setFocused(true);
-        onFocus?.();
-      }}
-      onSubmitEditing={onSubmit}
-      placeholder={placeholder}
-      placeholderTextColor={theme.colors.foregroundMuted}
-      returnKeyType={returnKeyType}
-      selectionColor={theme.colors.accent}
-      selectTextOnFocus={selectTextOnFocus}
-      style={[
-        styles.field,
-        style,
-        focused ? styles.fieldFocused : null,
-        !editable && dimWhenReadOnly ? styles.fieldDisabled : null,
-      ]}
-      value={value}
-    />
-  );
-}
-
-function ErrorNotice({
-  styles,
-  theme,
-  message,
-  action,
-  onAction,
-  actionDisabled = false,
-}: {
-  styles: ErrorNoticeStyles;
-  theme: Theme;
-  message: string;
-  action?: string | undefined;
-  onAction?: (() => void) | undefined;
-  actionDisabled?: boolean;
-}) {
-  return (
-    <View accessibilityRole="alert" style={styles.errorRow}>
-      <Icon name="CircleAlert" size={DIMENSION.icon} color={theme.colors.statusDanger} />
-      <Text style={styles.errorText}>{message}</Text>
-      {action && onAction ? (
-        <ControlButton
-          styles={styles}
-          theme={theme}
-          label={action}
-          disabled={actionDisabled}
-          onPress={onAction}
-        />
-      ) : null}
-    </View>
-  );
-}
-
-function CanvasPlaceholder({
-  styles,
-  theme,
-  title,
-  detail,
-  loading = false,
-}: {
-  styles: CanvasPlaceholderStyles;
-  theme: Theme;
-  title: string;
-  detail: string;
-  loading?: boolean;
-}) {
-  return (
-    <View style={styles.canvasState}>
-      {loading ? <ActivityIndicator color={theme.colors.accent} /> : null}
-      <Text style={styles.canvasTitle}>{title}</Text>
-      <Text style={styles.canvasDetail}>{detail}</Text>
-    </View>
-  );
-}
-
-interface AgentDirectoryPage {
-  entries: Array<{ agent: { id: string; workspaceId?: string | undefined } }>;
-  pageInfo: { hasMore: boolean; nextCursor: string | null };
-}
-
-type AgentDirectoryUpdate =
-  | { kind: "remove"; agentId: string }
-  | { kind: "upsert"; agent: { id: string; workspaceId?: string | undefined } };
-type AgentPlacement = { id: string; workspaceId: string };
-
-export function contributeSharedBrowserClient(client: PluginClientContext) {
-  const agents = new Map<string, AgentPlacement>();
-  const pills = new Map<string, { workspaceId: string; remove: () => void }>();
-  const lifetime = new AbortController();
-  let openWorkspaceIds = new Set<string>();
-  let refreshing = false;
-  let stopped = false;
-  let directoryGeneration = 0;
-  let pendingDirectory: { generation: number; updates: AgentDirectoryUpdate[] } | null = null;
-  let unsubscribeDirectory: (() => void) | null = null;
-  let releaseDirectory: (() => Promise<void>) | null = null;
-
-  const removePill = (agentId: string) => {
-    pills.get(agentId)?.remove();
-    pills.delete(agentId);
-  };
-  const syncPill = (agent: AgentPlacement) => {
-    const current = pills.get(agent.id);
-    if (!openWorkspaceIds.has(agent.workspaceId)) {
-      removePill(agent.id);
-      return;
-    }
-    if (current?.workspaceId === agent.workspaceId) return;
-    removePill(agent.id);
-    const workspaceId = agent.workspaceId;
-    const pill = client.addComposerPill({
-      id: "open-shared-browser",
-      workspaceId,
-      agentId: agent.id,
-      button: {
-        title: "Open Shared Browser",
-        icon: "PanelsTopLeft",
-        label: "Shared Browser",
-        behavior: {
-          kind: "action",
-          onPress() {
-            client.openPanel("shared-browser", { workspaceId });
-          },
-        },
-      },
-    });
-    pills.set(agent.id, { workspaceId, remove: pill.remove });
-  };
-  const syncAllPills = () => {
-    for (const agent of agents.values()) syncPill(agent);
-  };
-  const refreshPresence = async () => {
-    if (stopped || refreshing) return;
-    refreshing = true;
-    try {
-      const result = await client.rpc(listOpenBrowserWorkspacesRpc, {});
-      if (stopped) return;
-      openWorkspaceIds = new Set(result.workspaceIds);
-      syncAllPills();
-    } catch {
-      return;
-    } finally {
-      refreshing = false;
-    }
-  };
-  const applyUpdate = (target: Map<string, AgentPlacement>, update: AgentDirectoryUpdate) => {
-    if (update.kind === "remove") {
-      target.delete(update.agentId);
-      return;
-    }
-    const { id, workspaceId } = update.agent;
-    if (workspaceId) target.set(id, { id, workspaceId });
-    else target.delete(id);
-  };
-  const applyLiveUpdate = (update: AgentDirectoryUpdate) => {
-    if (stopped) return;
-    pendingDirectory?.updates.push(update);
-    applyUpdate(agents, update);
-    if (update.kind === "remove") {
-      removePill(update.agentId);
-      return;
-    }
-    const { id, workspaceId } = update.agent;
-    if (!workspaceId) {
-      removePill(id);
-      return;
-    }
-    syncPill({ id, workspaceId });
-    void refreshPresence();
-  };
-  const replaceAgents = (next: Map<string, AgentPlacement>) => {
-    for (const agentId of agents.keys()) {
-      if (!next.has(agentId)) removePill(agentId);
-    }
-    agents.clear();
-    for (const [agentId, agent] of next) agents.set(agentId, agent);
-    syncAllPills();
-  };
-  const followSnapshot = async (snapshot: AgentDirectoryPage) => {
-    if (stopped) return;
-    const generation = ++directoryGeneration;
-    const transaction = { generation, updates: [] as AgentDirectoryUpdate[] };
-    pendingDirectory = transaction;
-    const next = new Map<string, AgentPlacement>();
-    for (const { agent } of snapshot.entries) {
-      if (agent.workspaceId) next.set(agent.id, { id: agent.id, workspaceId: agent.workspaceId });
-    }
-
-    try {
-      let cursor = snapshot.pageInfo.hasMore ? snapshot.pageInfo.nextCursor : null;
-      while (cursor) {
-        const page = await client.paseo.agents.list({
-          scope: "active",
-          page: { limit: AGENT_DIRECTORY_PAGE_LIMIT, cursor },
-          signal: lifetime.signal,
-        });
-        if (stopped || pendingDirectory?.generation !== generation) return;
-        for (const { agent } of page.entries) {
-          if (agent.workspaceId)
-            next.set(agent.id, { id: agent.id, workspaceId: agent.workspaceId });
-        }
-        cursor = page.pageInfo.hasMore ? page.pageInfo.nextCursor : null;
-      }
-      if (stopped || pendingDirectory?.generation !== generation) return;
-      for (const update of transaction.updates) applyUpdate(next, update);
-      pendingDirectory = null;
-      replaceAgents(next);
-      await refreshPresence();
-    } catch {
-      if (!stopped && pendingDirectory?.generation === generation) pendingDirectory = null;
-    }
-  };
-
-  void client.paseo.agents
-    .list({
-      scope: "active",
-      page: { limit: AGENT_DIRECTORY_PAGE_LIMIT },
-      subscribe: {},
-      signal: lifetime.signal,
-    })
-    .then(({ subscription }) => {
-      if (stopped) {
-        void subscription.release().catch(() => undefined);
-        return undefined;
-      }
-      releaseDirectory = subscription.release;
-      unsubscribeDirectory = subscription.subscribe({
-        snapshot: (snapshot) => void followSnapshot(snapshot),
-        update: (message) => {
-          if (message.type === "agent_update") applyLiveUpdate(message.payload);
-        },
-      });
-      return undefined;
-    })
-    .catch(() => undefined);
-  const presenceTimer = setInterval(() => void refreshPresence(), PILL_PRESENCE_POLL_MS);
-
-  return () => {
-    if (stopped) return;
-    stopped = true;
-    directoryGeneration += 1;
-    pendingDirectory = null;
-    clearInterval(presenceTimer);
-    unsubscribeDirectory?.();
-    void releaseDirectory?.().catch(() => undefined);
-    lifetime.abort();
-    for (const { remove } of pills.values()) remove();
-    pills.clear();
-    agents.clear();
-  };
-}
 export function SharedBrowserPanel({
   theme,
   host,
@@ -863,6 +179,7 @@ export function SharedBrowserPanel({
   const navigateBrowser = useRpc(navigateBrowserRpc);
   const resizeBrowser = useRpc(resizeBrowserRpc);
   const applyDevicePreset = useRpc(applyDevicePresetRpc);
+  const setCaptureDensity = useRpc(setCaptureDensityRpc);
   const sendBrowserInput = useRpc(sendBrowserInputRpc);
   const beginBrowserGesture = useRpc(beginBrowserGestureRpc);
   const updateBrowserGesture = useRpc(updateBrowserGestureRpc);
@@ -871,11 +188,25 @@ export function SharedBrowserPanel({
   const mountedRef = useRef(false);
   const activeViewerTokenRef = useRef<string | null>(null);
   const stateRef = useRef<BrowserState | null>(null);
+  // Lease observations can change while acquisition awaits with no local token.
+  // Count ownership transitions, not expiry renewals or ordinary media frames.
+  const controllerObservationRevision = useRef(0);
   const frameRef = useRef<BrowserFrame | null>(null);
+  const committedViewport = useRef<{ sessionId: string; generation: number } | null>(null);
   const lastPointRef = useRef<{ x: number; y: number } | null>(null);
   const [inputLifecycle] = useState(createFrameLifecycle);
   const [legacyInputBusy, setLegacyInputBusy] = useState(false);
-  const captureInFlightRef = useRef(false);
+  // A visual-only old-read paint cannot wake strict initial-admission waiters.
+  const [admittedPaint, setAdmittedPaint] = useState<{ frameId: string; epoch: number } | null>(
+    null,
+  );
+  /** Notify initial-admission waiters only when the actual painted receipt gains input authority. */
+  const publishAdmittedPaint = (frameId: string, epoch: number) => {
+    setAdmittedPaint((previous) => {
+      if (previous?.frameId === frameId && previous.epoch === epoch) return previous;
+      return { frameId, epoch };
+    });
+  };
 
   const [state, setState] = useState<BrowserState | null>(null);
   const [controlToken, setControlToken] = useState<string | null>(null);
@@ -942,6 +273,19 @@ export function SharedBrowserPanel({
     (next: BrowserState) => {
       const previous = stateRef.current;
       if (previous && !isBrowserStateCurrent(previous, next)) return false;
+      // Server state projects "self" against this exact viewer token. Media can
+      // observe our acquisition before its RPC returns the control token, so
+      // that transition must not revoke its own still-pending settlement.
+      // Competing ownership and subsequent release still advance the fence.
+      const observesOwnAcquisition = previous?.controller !== "self" && next.controller === "self";
+      if (
+        previous &&
+        !observesOwnAcquisition &&
+        (previous.controller !== next.controller ||
+          previous.controllerLabel !== next.controllerLabel)
+      ) {
+        controllerObservationRevision.current += 1;
+      }
       const currentFrame = frameRef.current;
       if (previous && didBrowserRuntimeRestart(previous, next)) {
         setRuntimeNotice(
@@ -1005,35 +349,72 @@ export function SharedBrowserPanel({
     setRuntimeNotice(null);
   }, [reset, workspaceId, host.id, inputLifecycle]);
 
-  const captureQuery = useQuery({
-    queryKey: ["shared-browser", "capture", viewerToken, preferences.captureQuality],
-    queryFn: async () => {
-      if (!viewerToken) throw new Error("The browser viewer is not attached.");
-      const mutationEpoch = inputLifecycle.epoch;
-      const knownFrame = frameRef.current;
-      captureInFlightRef.current = true;
-      try {
-        const result = await captureBrowser({
-          viewerToken,
-          quality: preferences.captureQuality,
-          knownFrameId: knownFrame?.frameId ?? null,
-        });
-        return {
-          ...result,
-          mutationEpoch,
-          viewerToken,
-          captureQuality: preferences.captureQuality,
-        };
-      } finally {
-        captureInFlightRef.current = false;
-      }
+  useLayoutEffect(() => {
+    committedViewport.current = state
+      ? { sessionId: state.sessionId, generation: state.viewportGeneration }
+      : null;
+  }, [state?.sessionId, state?.viewportGeneration]);
+
+  const video = useBrowserVideo({
+    viewerToken,
+    quality: "high",
+    bitrate: preferences.videoBitrate,
+    fps: preferences.videoFps,
+    epoch: () => inputLifecycle.epoch,
+    viewport: () => stateRef.current?.viewport ?? null,
+    isCurrent: (packet, epoch) =>
+      mountedRef.current &&
+      activeViewerTokenRef.current === viewerToken &&
+      epoch === inputLifecycle.epoch &&
+      committedViewport.current?.sessionId === packet.frame.sessionId &&
+      committedViewport.current?.generation === packet.frame.viewportGeneration &&
+      stateRef.current !== null &&
+      isFrameCurrent(packet.frame, stateRef.current),
+    isDisplayCurrent: (packet) => {
+      const current = stateRef.current;
+      return (
+        mountedRef.current &&
+        activeViewerTokenRef.current === viewerToken &&
+        current !== null &&
+        isFrameDisplayCurrent(packet.frame, current)
+      );
     },
-    enabled: Boolean(viewerToken),
-    retry: false,
-    refetchInterval: (query) => browserCaptureInterval(query.state.data?.state.status, activeInput),
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
-    staleTime: 0,
+    acceptState,
+    onPresented: (packet, epoch) => {
+      inputLifecycle.accept(epoch, packet.frame);
+      publishAdmittedPaint(packet.frame.frameId, epoch);
+      setLegacyInputBusy(inputLifecycle.busy);
+    },
+  });
+
+  const {
+    query: captureQuery,
+    refreshCapture,
+    retryFrameCapture,
+  } = useBrowserImageCapture({
+    active: !video.supported || video.active,
+    viewerToken,
+    quality: preferences.captureQuality,
+    activeInput,
+    fallbackRevision: video.fallbackRevision,
+    videoOwnsPresentation: Boolean(
+      video.front &&
+        !video.fallbackRevision &&
+        state &&
+        isFrameDisplayCurrent(video.front.frame, state),
+    ),
+    hasVideoPresentation: () =>
+      Boolean(
+        video.front &&
+          !video.fallbackRevision &&
+          activeViewerTokenRef.current === viewerToken &&
+          stateRef.current &&
+          isFrameDisplayCurrent(video.front.frame, stateRef.current),
+      ),
+    refreshVideo: video.refresh,
+    mutationEpoch: () => inputLifecycle.epoch,
+    knownFrame: () => frameRef.current,
+    capture: captureBrowser,
   });
 
   useEffect(() => {
@@ -1053,6 +434,7 @@ export function SharedBrowserPanel({
         viewport: result.state.viewport,
         viewerToken: result.viewerToken,
         mutationEpoch: result.mutationEpoch,
+        fallbackRevision: result.fallbackRevision,
       });
     }
   }, [acceptState, captureQuery.data, preferences.captureQuality, receive]);
@@ -1071,18 +453,6 @@ export function SharedBrowserPanel({
     setViewportWidth(String(state.viewport.width));
     setViewportHeight(String(state.viewport.height));
   }, [state?.sessionId, state?.viewport.height, state?.viewport.width]);
-
-  const refreshCapture = useCallback(() => {
-    const requestWasInFlight = captureInFlightRef.current;
-    const request = captureQuery.refetch({ cancelRefetch: false });
-    if (requestWasInFlight) {
-      void request.then(() => captureQuery.refetch({ cancelRefetch: false }));
-    }
-  }, [captureQuery.refetch]);
-
-  const retryFrameCapture = useCallback(() => {
-    void captureQuery.refetch({ cancelRefetch: false });
-  }, [captureQuery.refetch]);
 
   const mutationFailed = useCallback(
     (error: unknown) => {
@@ -1106,42 +476,68 @@ export function SharedBrowserPanel({
     [acceptState, refreshCapture],
   );
 
-  const acquireMutation = useMutation({
+  const mutationIdentity = JSON.stringify([
+    host.id,
+    workspaceId,
+    viewerToken,
+    controlToken,
+    controllerObservationRevision.current,
+  ]);
+  // Ref observations revoke settlement immediately, before the state commit.
+  const currentMutationIdentity = () =>
+    JSON.stringify([
+      host.id,
+      workspaceId,
+      activeViewerTokenRef.current,
+      controlToken,
+      controllerObservationRevision.current,
+    ]);
+  const acquireMutation = useBrowserScopedMutation({
+    identity: mutationIdentity,
+    currentIdentity: currentMutationIdentity,
     mutationFn: acquireControl,
-    retry: false,
     onSuccess: (result) => {
       setControlToken(result.controlToken);
       mutationSucceeded(result.state);
     },
     onError: mutationFailed,
   });
-  const releaseMutation = useMutation({
+  const releaseMutation = useBrowserScopedMutation({
+    identity: mutationIdentity,
+    currentIdentity: currentMutationIdentity,
     mutationFn: releaseControl,
-    retry: false,
     onSuccess: (result) => {
       setControlToken(null);
       mutationSucceeded(result.state);
     },
     onError: mutationFailed,
   });
-  const navigateMutation = useMutation({
+  const navigateMutation = useBrowserScopedMutation({
+    identity: mutationIdentity,
+    currentIdentity: currentMutationIdentity,
     mutationFn: navigateBrowser,
-    retry: false,
-    onSuccess: (result) => mutationSucceeded(result.state),
+    onSuccess: (result) => {
+      mutationSucceeded(result.state);
+      // Only acknowledged navigation grants explicit viewing recovery. Ordinary
+      // gesture/image refresh does not rearm an exhausted video reader.
+      video.retry();
+    },
     onError: mutationFailed,
   });
-  const resizeMutation = useMutation({
+  const resizeMutation = useBrowserScopedMutation({
+    identity: mutationIdentity,
+    currentIdentity: currentMutationIdentity,
     mutationFn: resizeBrowser,
-    retry: false,
     onSuccess: (result) => {
       setDevicePickerOpen(false);
       mutationSucceeded(result.state);
     },
     onError: mutationFailed,
   });
-  const deviceMutation = useMutation({
+  const deviceMutation = useBrowserScopedMutation({
+    identity: mutationIdentity,
+    currentIdentity: currentMutationIdentity,
     mutationFn: applyDevicePreset,
-    retry: false,
     onSuccess: (result) => mutationSucceeded(result.state),
     onError: mutationFailed,
   });
@@ -1151,9 +547,10 @@ export function SharedBrowserPanel({
     inputLifecycle.settle();
     setLegacyInputBusy(true);
   };
-  const inputMutation = useMutation({
+  const inputMutation = useBrowserScopedMutation({
+    identity: mutationIdentity,
+    currentIdentity: currentMutationIdentity,
     mutationFn: sendBrowserInput,
-    retry: false,
     onSuccess: (result) => {
       settleLegacyInput();
       mutationSucceeded(result.state);
@@ -1164,47 +561,106 @@ export function SharedBrowserPanel({
     },
   });
 
+  const densityControl = useBrowserCaptureDensity({
+    identity: JSON.stringify([host.id, workspaceId, viewerToken, controlToken]),
+    current: () => {
+      const current = stateRef.current;
+      const viewer = activeViewerTokenRef.current;
+      if (viewingExpired || !current || !viewer || !controlToken || current.controller !== "self")
+        return null;
+      return {
+        state: current,
+        context: {
+          viewerToken: viewer,
+          controlToken,
+          expected: {
+            sessionId: current.sessionId,
+            navigationGeneration: current.navigationGeneration,
+            viewportGeneration: current.viewportGeneration,
+            ...(current.runtimeId ? { runtimeId: current.runtimeId } : {}),
+            ...(current.bridgeEpoch !== undefined ? { bridgeEpoch: current.bridgeEpoch } : {}),
+          },
+        },
+      };
+    },
+    change: setCaptureDensity,
+    beforeChange: () => inputLifecycle.bump(),
+    onSuccess: mutationSucceeded,
+    onError: mutationFailed,
+  });
+
   const anyMutationPending =
     acquireMutation.isPending ||
     releaseMutation.isPending ||
     navigateMutation.isPending ||
     resizeMutation.isPending ||
+    densityControl.pending ||
     deviceMutation.isPending ||
     inputMutation.isPending;
-  const viewingExpired = isExpiredBrowserViewerError(captureQuery.error);
+  const videoViewerExpired =
+    video.errorViewerToken === viewerToken && isExpiredBrowserViewerError(video.error);
+  const viewingExpired = videoViewerExpired || isExpiredBrowserViewerError(captureQuery.error);
   const canControl = Boolean(
     viewerToken && controlToken && state?.controller === "self" && !viewingExpired,
   );
   const frontLayer = buffer.front === null ? null : buffer.layers[buffer.front];
+  useLayoutEffect(() => {
+    const candidate = frontLayer?.candidate;
+    if (
+      candidate &&
+      candidate.fallbackRevision === video.fallbackRevision &&
+      candidate.mutationEpoch === inputLifecycle.epoch &&
+      candidate.viewerToken === viewerToken &&
+      state &&
+      isFrameCurrent(candidate.frame, state)
+    )
+      video.completeFallback(candidate.fallbackRevision ?? 0);
+  }, [frontLayer, video.fallbackRevision, state, viewerToken, inputLifecycle]);
+  const videoFrame =
+    video.front && state && isFrameCurrent(video.front.frame, state) ? video.front.frame : null;
   const currentFrame =
-    frame &&
+    videoFrame ??
+    (frame &&
     state &&
     frontLayer?.candidate.viewerToken === viewerToken &&
     isFrameCurrent(frame, state)
       ? frame
-      : null;
+      : null);
   useEffect(() => {
     const candidate = frontLayer?.candidate;
-    if (!frame || !candidate || candidate.mutationEpoch !== inputLifecycle.epoch) return;
+    if (videoFrame || !frame || !candidate || candidate.mutationEpoch !== inputLifecycle.epoch)
+      return;
     inputLifecycle.accept(candidate.mutationEpoch, frame);
+    publishAdmittedPaint(frame.frameId, candidate.mutationEpoch);
     setLegacyInputBusy(inputLifecycle.busy);
-  }, [frame, frontLayer, inputLifecycle]);
+  }, [frame, frontLayer, inputLifecycle, videoFrame]);
   const canSendInput =
     canControl && Boolean(currentFrame) && !inputMutation.isPending && !legacyInputBusy;
 
   // Layout belongs to the decoded front frame. A denser capture adds detail,
   // not a larger 100% layout; scale never writes to the shared browser state.
+  const visualFrame = video.front?.frame ?? frame;
   const canvasLayout = useMemo(
     () =>
-      frame
+      visualFrame
         ? getBrowserCanvasLayout(
             containerSize,
-            frame,
-            frontLayer?.candidate.viewport ?? state?.viewport ?? frame,
+            visualFrame,
+            video.front
+              ? (video.frontViewport ?? visualFrame)
+              : (frontLayer?.candidate.viewport ?? state?.viewport ?? visualFrame),
             scaleMode,
           )
         : null,
-    [containerSize, frame, frontLayer, state?.viewport, scaleMode],
+    [
+      containerSize,
+      visualFrame,
+      frontLayer,
+      state?.viewport,
+      scaleMode,
+      video.front,
+      video.frontViewport,
+    ],
   );
   const displayRect = canvasLayout?.frameRect ?? null;
 
@@ -1227,13 +683,17 @@ export function SharedBrowserPanel({
   const inputContext = useCallback(() => {
     const context = controlContext();
     const current = stateRef.current;
-    const targetFrame = frameRef.current;
+    const targetVideo = video.frontRef.current;
+    // A revoked video remains painted until React commits the fallback. Never
+    // borrow the JPEG token while those older video pixels still cover it.
+    if (video.front && !targetVideo) return null;
+    const targetFrame = targetVideo?.frame ?? frameRef.current;
     if (
       !context ||
       !current ||
       !targetFrame ||
       !isFrameCurrent(targetFrame, current) ||
-      frontLayer?.candidate.viewerToken !== context.viewerToken
+      (!targetVideo && frontLayer?.candidate.viewerToken !== context.viewerToken)
     ) {
       return null;
     }
@@ -1245,7 +705,7 @@ export function SharedBrowserPanel({
         viewportGeneration: targetFrame.viewportGeneration,
       },
     };
-  }, [controlContext, frontLayer]);
+  }, [controlContext, frontLayer, video.frontRef, video.front]);
 
   const requireControlContext = useCallback(() => {
     const context = controlContext();
@@ -1286,21 +746,30 @@ export function SharedBrowserPanel({
       acquireMutation.isPending,
     modalOpen: devicePickerOpen || toolbarMenu !== null,
   });
+  /** Existing channels retain control incarnation while their next frame decodes. */
+  const gestureControlContext = useCallback(() => {
+    const context = controlContext();
+    const current = stateRef.current;
+    if (!mountedRef.current || !context || !current?.runtimeId || current.bridgeEpoch === undefined)
+      return null;
+    return {
+      ...context,
+      expected: {
+        ...context.expected,
+        runtimeId: current.runtimeId,
+        bridgeEpoch: current.bridgeEpoch,
+      },
+    };
+  }, [controlContext]);
+
   // Forward physical mouse events and genuine touch on every remote preset.
   const canvasInput = useBrowserCanvasInput({
     authority: () => {
-      const context = inputContext();
-      const current = stateRef.current;
-      if (!context || !current?.runtimeId || current.bridgeEpoch === undefined) return null;
-      return {
-        ...context,
-        expected: {
-          ...context.expected,
-          runtimeId: current.runtimeId,
-          bridgeEpoch: current.bridgeEpoch,
-        },
-      };
+      const input = inputContext();
+      const context = gestureControlContext();
+      return input && context ? { ...context, target: input.target } : null;
     },
+    controlAuthority: gestureControlContext,
     transport: { begin: beginBrowserGesture, update: updateBrowserGesture, end: endBrowserGesture },
     ownershipKey: JSON.stringify([
       viewerToken,
@@ -1317,7 +786,7 @@ export function SharedBrowserPanel({
       scaleMode,
       liveInputEnabled,
     ]),
-    decodedFrameId: currentFrame?.frameId ?? null,
+    decodedFrameId: admittedPaint?.epoch === inputLifecycle.epoch ? admittedPaint.frameId : null,
     enabled: liveInputEnabled,
     displaySize: displayRect,
     viewport: state?.viewport ?? null,
@@ -1468,15 +937,16 @@ export function SharedBrowserPanel({
   useBrowserViewerRecovery({
     identity: JSON.stringify([host.id, workspaceId]),
     viewerToken,
-    failedViewerToken: viewerToken,
-    captureError: captureQuery.error,
+    failedViewerToken: videoViewerExpired ? video.errorViewerToken : viewerToken,
+    captureError: videoViewerExpired ? video.error : captureQuery.error,
     pending: reconnecting || attachQuery.isFetching,
     reconnect,
   });
 
   // Expiry belongs to the viewing-only recovery path, not an action failure.
   // A failed reattachment still surfaces its attachQuery error and manual retry.
-  const connectionError = attachQuery.error ?? (viewingExpired ? null : captureQuery.error);
+  const connectionError =
+    attachQuery.error ?? (viewingExpired ? null : (captureQuery.error ?? video.error));
   const recoveryError =
     state?.recoveryState === "runtime-unavailable"
       ? (state.error ?? "Browser runtime unavailable.")
@@ -1513,11 +983,19 @@ export function SharedBrowserPanel({
   const deviceLabel = selectedResolutionPresetId
     ? (activeDevicePreset?.label ?? "Custom display")
     : `${emulation.mode === "mobile" ? "Mobile" : "Desktop"} · custom display`;
-  const transportLabel = currentFrame?.transport === "cdp-screencast" ? "CDP" : "fallback";
-  const frameSummary = currentFrame
+  const transportLabel =
+    video.front && video.fallbackRevision
+      ? "Updating video"
+      : video.front
+        ? "Video"
+        : frame?.transport === "cdp-screencast"
+          ? "CDP"
+          : "fallback";
+  const summaryFrame = video.front?.frame ?? currentFrame;
+  const frameSummary = summaryFrame
     ? layout.compact
-      ? `${currentFrame.width}×${currentFrame.height} · ${transportLabel}`
-      : `${currentFrame.width} × ${currentFrame.height} · ${Math.ceil(currentFrame.byteLength / BYTES_PER_KIBIBYTE)} KB · ${transportLabel} · ${deviceLabel}`
+      ? `${summaryFrame.width}×${summaryFrame.height} · ${transportLabel}`
+      : `${summaryFrame.width} × ${summaryFrame.height} · ${Math.ceil((video.front ? (video.front.dataBase64.length * 3) / 4 : (frame?.byteLength ?? 0)) / BYTES_PER_KIBIBYTE)} KB · ${transportLabel} · ${deviceLabel}`
     : state
       ? `${state.viewport.width} × ${state.viewport.height} canonical`
       : "No frame";
@@ -1723,7 +1201,22 @@ export function SharedBrowserPanel({
               />
             );
           })}
-          {frame && displayRect ? (
+          {video.supported ? (
+            <BrowserVideoSurface
+              canvasRef={video.canvasRef}
+              style={{
+                position: "absolute",
+                left: displayRect?.x ?? 0,
+                top: displayRect?.y ?? 0,
+                width: displayRect?.width ?? containerSize.width,
+                height: displayRect?.height ?? containerSize.height,
+                opacity: video.front ? 1 : 0,
+                overflow: "hidden",
+                borderRadius: layout.compact ? DIMENSION.screenRadius - SPACE.xs : 0,
+              }}
+            />
+          ) : null}
+          {currentFrame && displayRect ? (
             <View
               ref={canvasInput.canvasRef}
               {...canvasInput.panHandlers}
@@ -1731,7 +1224,7 @@ export function SharedBrowserPanel({
               pointerEvents={liveInputEnabled ? "auto" : "none"}
               style={interactionStyle}
             />
-          ) : imageError ? (
+          ) : video.front ? null : imageError ? (
             <CanvasPlaceholder
               styles={styles}
               theme={theme}
@@ -1802,7 +1295,17 @@ export function SharedBrowserPanel({
               favoritePresetIds={preferences.favoritePresetIds}
               selectDisabled={!canControl || anyMutationPending}
               favoriteDisabled={preferences.disabled}
+              density={state?.captureScale ?? 1}
+              viewport={state?.viewport ?? null}
+              onDensityChange={(density) => {
+                if (!requireControlContext() || anyMutationPending) return;
+                densityControl.select(density);
+              }}
               captureQuality={preferences.captureQuality}
+              videoBitrate={preferences.videoBitrate}
+              videoFps={preferences.videoFps}
+              onVideoBitrateChange={preferences.changeVideoBitrate}
+              onVideoFpsChange={preferences.changeVideoFps}
               onSelect={selectDevicePreset}
               onToggleFavorite={(id) => {
                 void preferences.toggleFavorite(id);

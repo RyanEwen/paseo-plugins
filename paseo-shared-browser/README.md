@@ -33,11 +33,14 @@ organization names.
 - The plugin server runs beside the Paseo daemon and starts one `agent-browser` session and Chromium
   process per open browser workspace. Browser execution, profiles, IPC, and network access are on the
   daemon host, not on the viewing phone, browser, or desktop app.
-- The plugin owns `agent-browser` version `0.37.1`, its IPC directory, and the Chromium executable.
+- The plugin owns `agent-browser` version `0.38.2`, its IPC directory, and the Chromium executable.
   It strips inherited `AGENT_BROWSER_*` variables and sets `AGENT_BROWSER_SOCKET_DIR`,
   `AGENT_BROWSER_IDLE_TIMEOUT_MS=0`, `AGENT_BROWSER_STREAM_PORT=0`, and
   `AGENT_BROWSER_NO_AUTO_DIALOG=1` itself.
-- Frames stream from Chromium through CDP `Page.startScreencast`, with a bounded screenshot fallback.
+- By default every client receives JPEG frames from CDP `Page.startScreencast` or bounded
+  screenshots, and no capture extension is loaded into Chromium. When the daemon is started with
+  `PASEO_SHARED_BROWSER_VIDEO=1`, desktop/web clients with usable WebCodecs receive encoded
+  workspace-tab video instead; other clients keep JPEG.
   Remote input supports mouse hover, wheel scrolling, continuous dragging, native touch pan/pinch,
   tap, double-tap, right-click, text, and special keys.
 - Device presets for Desktop Chrome, iPhone 15 Pro, Pixel 7, and iPad Pro 11 change Chromium's
@@ -150,13 +153,9 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
   with a sharper 824 × 1678 capture.
 - Desktop presets include 1920 × 1080 and 2560 × 1440 (16:9), 1920 × 1200 and
   2560 × 1600 (16:10), and 1920 × 1920 and 2560 × 2560 (1:1).
-- Desktop choices use height names such as 720p, 1080p, 1200p and 1440p, with
-  dimensions shown alongside. Square choices name their width explicitly.
-  The 1440-wide choices are 1440 × 810, 1440 × 900 and 1440 × 1440.
 - The Resolution and quality menu groups desktop choices by 16:9, 16:10 and 1:1,
   then mobile. Each group sorts by width. Filled stars mark favorites; the monitor
-  menu provides favorites in that same grouped order and access to the full
-  resolution and quality list.
+  menu provides favorites and access to the full resolution and quality list.
 - Monitor and browser actions open compact anchored menus rather than dialogs. Menus stay
   within the pane, scroll long lists, and dismiss with an outside press, Escape or native Back.
 - The monitor menu offers **Fit to panel** (default) and **Actual size (100%)**. Actual size
@@ -167,19 +166,73 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
   page instead. Fitting images stay centered without empty scroll ranges; a scrollbar on
   one axis does not force one on the other. Returning to Fit resets local offsets without
   reloading the page or image.
-- Quality choices Low, Medium and High request JPEG quality 40, 65 and 85 respectively (Medium is the default).
-  Detailed large views use more bandwidth; frames reduce quality further only if they
-  exceed the 800 KB frame limit. Preferences persist on the connected Paseo host.
-- Captures refresh after input. A stalled screencast falls back to a fresh screenshot instead
-  of indefinitely showing an old image.
-- Captures use individual JPEG frames. The transport label identifies streamed
-  frames or screenshot fallback. Encoded video and source caching are separate
-  transport work.
-- Actual JPEG dimensions must match the selected capture resolution before a frame is accepted.
+- With `PASEO_SHARED_BROWSER_VIDEO=1` set in the daemon environment, desktop and web clients
+  with WebCodecs play genuine encoded tab video (H264 when supported, otherwise VP8). The
+  bundled capture helper, which holds `tabCapture` and `debugger` permissions, is then
+  loaded into every workspace Chromium profile and captures the exact workspace tab, not a
+  screenshot loop or title-selected window. Without the variable the helper is never
+  materialized or loaded, and clients show a one-time disabled reply then use JPEG.
+  Android and other native apps use JPEG: the plugin SDK this package targets publishes no
+  encoded-video surface, so native video is deferred until the host ships one.
+- The monitor menu's resolution and quality list separates JPEG quality (40%, 65%, 85%,
+  or 100%), video bitrate (2, 5, 12, or 24 Mbps), and video frame rate (15, 30, or 60 FPS).
+  Defaults are JPEG65 (Medium) and, when video is enabled, 12 Mbps at 30 FPS. Old saved quality choices keep their
+  corresponding video bitrate when upgraded. These are encoder targets, not measured
+  bandwidth or guaranteed frame rates. Large JPEGs may reduce quality to stay within
+  the 800 KB frame bound. Preferences persist on the connected Paseo host.
+  Capture density is a separate 1x/2x option for the controller. It raises real source
+  pixel detail without changing page size, input mode, or user agent. The 2x option
+  requires both page dimensions to be 1280 or less; larger pages keep 1x rather than
+  being resized. It can increase processing and bandwidth substantially. Quality
+  changes do not navigate or reload the shared page.
+- Video packets travel through the existing authenticated Paseo RPC connection, including its
+  relay. No extra video port or unauthenticated media server is opened. This is encoded video
+  delivered in bounded request/reply batches, not WebRTC or a custom push subscription.
+- Animated native capture supports a source ceiling of 60 frames per second. Ordinary
+  frames follow each encoder's requested rate; a recovery keyframe can use the next
+  eligible frame without waiting for that interval. Quiet tabs produce genuine frames
+  around once per second; repeated packets never acquire a newer source capture timestamp.
+  At most three bitrate/frame-rate cohorts share one source. Changing quality never evicts
+  another active cohort. If all three are occupied, another profile uses JPEG fallback
+  and retries video after 2.5 seconds while visible. Hiding or unmounting cancels
+  that viewing-only retry; the soft error clears after a fresh video frame paints.
+  Idle encoders release their buffers and codecs after two seconds without an active read;
+  when no video consumer remains, the native track and helper also close. A returning video
+  viewer can reacquire the source safely. Higher rates/bitrates and multiple encoders cost
+  more host CPU and bandwidth; pixel density and the host's native codecs also affect cost.
+- Hidden documents, page-cache suspension, inactive native AppState and panel unmount stop
+  this viewer's video reads and release decoding resources. Resuming requests a fresh
+  keyframe. One already-issued bounded RPC may finish, but cannot restore old input authority.
+  Video remains video when the page is quiet; no idle still-image overlay or static-page
+  polling is used. Keyframes restore decoding after a gap but do not make video lossless.
+- Every independent human press requires its own decoded and painted frame receipt
+  (JPEG or video); held drags, releases and keys of an admitted gesture continue on
+  its ordered channel while video catches up. Agent commands retain strict
+  fresh-frame targeting. Document, viewport, runtime, bridge and controller changes
+  invalidate the channel. Dropped packets recover at a keyframe rather
+  than decoding a broken delta chain. Video reads wait outside the input queues.
+- If no fresh video is painted for 2.5 seconds, the viewer revokes video input authority and
+  requests JPEG fallback and a fresh keyframe. The retained video remains visible
+  until a current image has decoded, so a delayed fallback cannot flash an older view. Decoder/capture failures also retain
+  fallback. The Video, CDP and fallback labels describe the displayed transport.
+- JPEG captures refresh after input. A stalled screencast falls back to a fresh screenshot.
+  Healthy painted video suppresses redundant JPEG polling and focus captures. Media
+  reads use source generations without repeatedly querying page metadata inside
+  the control queue; ordinary status checks still reconcile navigation state.
+  Shared JPEG screencasting starts on image demand and stops after three seconds
+  without demand. Phone/image viewers and agent captures restart it lazily;
+  video reads alone do not keep it running. An image fallback after retirement
+  may wait for stream startup or use the existing screenshot fallback.
+  Repeated reads of the exact cached JPEG send metadata only; image source age still expires
+  within one second. The last decoded image remains visible while its replacement loads.
+- Reconnecting or switching browser tabs restores the selected device viewport, capture density,
+  touch and user agent before accepting new frames.
+- Actual video and JPEG dimensions must match the selected capture resolution before a frame is accepted.
   The fallback captures the complete visible viewport, preserves scroll position, and accounts
   for device pixel ratio and capture scale so inputs still use the original layout coordinates.
 - The last decoded frame stays visible while its replacement loads, with native image fading
-  disabled. Input targets the displayed frame, and obsolete image callbacks cannot replace it.
+  disabled. Human presses and agent commands use the painted frame's receipt.
+  Obsolete image callbacks cannot replace the displayed frame.
 - Status row: session state, viewer count, controller, and lease expiry.
 - Returning after viewer expiry reattaches viewing once automatically while preserving the
   page. Expired control is cleared; take control again to send input. Expected expiry is not
@@ -190,10 +243,10 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
 - Human control: **Take control**, **Release**, and **Take over** for explicit handoff. Agent MCP
   calls have no forced-takeover operation.
 - With control, mouse movement forwards real hover effects and standard browser cursor changes.
-  Automatic cursors resolve selectable text to an I-beam while respecting explicit
-  cursor styles and non-selectable areas.
   Wheel scrolling stays inside the browser canvas; held drags update before release. Leaving the
   canvas clears remote hover, while dragging beyond its edges still releases the held button.
+- Linux hover media-queries need the opt-in private virtual display described under
+  Maintainer references; by default browsers stay headless.
 - Native touch forwards active fingers continuously, including pan and pinch on desktop and mobile
   presets. Physical mouse buttons and double clicks retain their natural actions; touch never
   changes into a synthetic mouse gesture.
@@ -240,48 +293,117 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
   callbacks expose no authenticated caller identity, so these human-viewer tokens are a workflow
   safeguard, not an authorization boundary. The stdio MCP adapter separately uses an
   opaque, workspace-bound credential.
-- Downloads, uploads, clipboard synchronization, media permissions, extensions, native passkeys,
-  and platform authenticators are not exposed by this plugin.
+- The bundled trusted video helper has tabCapture/debugger access to capture the exact workspace
+  tab. It exposes no content scripts, site messages, network host permissions or web-accessible
+  resources. User-supplied extensions and page media permissions remain unavailable.
+- Downloads, uploads, clipboard synchronization, native passkeys and platform authenticators
+  are not exposed by this plugin.
 - Browser navigation uses the daemon OS user's network access, including local development servers.
   It is therefore a trusted-agent capability; this plugin deliberately does not apply a blanket
   loopback or RFC1918 navigation ban.
 
 ## Develop
 
+Follow the repository's `AGENTS.md`. Runtime verification must use an isolated
+Paseo home, never the default daemon, active plugin installation, or signed-in
+profile. Run dependency installation from the monorepo root, then the following
+checks from `paseo-shared-browser`:
+
 ```bash
-bun install
+bun install --frozen-lockfile
 bun run typecheck
 bun run check
 bun run test:unit
-PASEO_HOME="$(mktemp -d)" bun run prepare:runtime
 ```
 
-Treat the default Paseo daemon and profile as live user state. Use an isolated
-`PASEO_HOME` for runtime preparation and tests; do not run development lifecycle
-commands against the default daemon. Keep the prepared home available for smoke
-tests so they can resolve its runtime assets.
+`node scripts/test-image-capture-mounted.mjs --tooling-root /path/to/test-workspace`
+opt-in checks the real React/React Query image scheduling and viewing recovery hooks
+in JSDOM. The tooling workspace must already provide compatible React, react-dom,
+jsdom, React Query and esbuild. The plugin intentionally does not add these DOM test
+dependencies or install missing packages. Omitting `--tooling-root` uses this
+checkout if its dependencies include them. The command owns and removes temporary
+hook bundles; it never launches or accesses a browser/runtime or profile.
+For reproducible mounted checks, create a disposable tooling workspace with
+React and react-dom 19.1.0 (matching this repository's React version), jsdom
+30.1.1, React Query 5.102.3 and esbuild 0.28.2. jsdom requires Node 24.15 or
+newer on the supported Node 24 line. These are test-only dependencies, not
+plugin runtime dependencies. For example:
 
-`PASEO_HOME=<prepared-test-home> bun run test:smoke` launches the configured real Chromium runtime and exercises two viewers,
+```bash
+npm install --prefix /tmp/shared-browser-dom-tools --ignore-scripts --no-save \
+  react@19.1.0 react-dom@19.1.0 jsdom@30.1.1 \
+  @tanstack/react-query@5.102.3 esbuild@0.28.2
+node scripts/test-image-capture-mounted.mjs --tooling-root /tmp/shared-browser-dom-tools
+node scripts/test-panel-video-mounted.mjs --tooling-root /tmp/shared-browser-dom-tools --fixture settlement
+```
+
+The panel fixture also accepts `handoff`, `rapid`, `continuous` and `admission`.
+Run each variant for changes to media handoff or input policy. The `settlement`
+fixture checks late replies across viewer and controller replacement. Delete
+the tooling directory when done.
+
+Use the same command with `--fixture density` for six mounted controller/density
+menu regressions, including observer bounds, same-workspace token replacement,
+unmount and no retry after an uncertain write.
+
+Prepare runtime assets with an explicit temporary `PASEO_HOME` before either
+browser gate. Keep that directory outside the default Paseo home. For example,
+on POSIX systems:
+
+```bash
+export PASEO_HOME="$(mktemp -d -t shared-browser-verification-XXXXXX)"
+bun run prepare:runtime
+bun run test:smoke
+bun run test:video
+```
+
+Remove the temporary directory after verification. On Windows, use a new
+explicit temporary directory in `$env:PASEO_HOME` instead. Tests manage their
+own browser teardown; do not run daemon lifecycle commands against the default
+host to recover a test failure.
+
+`bun run test:smoke` launches the configured real Chromium runtime and exercises two viewers,
 control handoff, reconnect, stale-frame rejection, viewport changes, device emulation, profile
 persistence, and archive teardown.
+
+`bun run test:video` is an optional real video gate. It opts its own runtime into encoded video
+and reads prepared Chromium/CLI assets,
+then creates its own temporary Paseo home, browser profile, Unix socket and local fixture pages.
+It checks the production video decoder and canvas at 1280x800, sharp Pixel and 2560x2560,
+including all four corner markers. It never uses the live browser. This gate requires usable
+WebCodecs/tab capture and the local runtime assets; it is separate from unit tests.
+Linux CI runs this video gate without skipping unsupported capture. macOS and Windows run the image/browser smoke; their native video
+hardware and remote-network performance require separate qualification. CI also
+runs the actual Paseo compiler on both plugin entries.
 
 Release Please maintains the version, changelog, component tag, and GitHub release from
 Conventional Commits in the monorepo.
 
 Both the Paseo daemon and app must satisfy the version range in `paseo-plugin.json`.
-The upstream 0.9, 0.10 and stable 0.11 ranges and the tested `0.11.0-beta.3` allowance
-are retained. The sidebar entry appears only on clients that expose its API.
-The client surface uses React Native primitives and works in desktop, web, iOS,
-and Android Paseo clients.
+The upstream 0.9, 0.10 and 0.11 ranges remain supported by the manifest;
+the tested `0.11.0-beta.3` prerelease is also allowed. Older daemon/client
+combinations still need runtime qualification. Encoded video is opt-in on the daemon and
+requires WebCodecs in a web client; JPEG is always available. The client surface uses React
+Native primitives and works in desktop, web, iOS, and Android Paseo clients.
 
-A wheel capture can finish decoding after input revoked its frame token. The server
+Every independent press (mouse down or first touch contact) carries the decoded frame
+receipt that was visible when it was made. Receipts last five seconds and are spent by
+acknowledged input, so a stalled or superseded presentation cannot admit a later click;
+held drags, releases and keys continue on their channel. A wheel capture can finish decoding
+after input revoked its frame token. The server
 returns a known non-admission receipt before creating a new channel; the canvas waits
 for another decoded frame before admitting that still-unsent gesture. Recovery allows
 up to three admission attempts within one four-second decoded-frame wait budget.
 Published input, unknown outcomes, expired leases, and replaced contexts are never retried.
 
 
-## Optional Linux desktop hover
+## Maintainer references
+
+[Streaming design](STREAMING_DESIGN.md) documents media ownership, resource
+bounds, input admission and recovery. [Remote-control research](REMOTE_BROWSER_RESEARCH.md)
+records primary-source comparisons and the trade-offs behind continuous human
+input. These describe the implementation's guarantees, not a promise of a
+particular frame rate or remote-network latency.
 
 Hidden browsers are headless by default. To expose desktop pointer and hover
 behavior on Linux, opt in by setting `PASEO_SHARED_BROWSER_XVFB=1` (exactly `1`;

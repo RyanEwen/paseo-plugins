@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { BrowserGestureEvent } from "../shared/browser";
+import {
+  type BrowserGestureEvent,
+  type BrowserInputEvent,
+  MAX_HELD_BROWSER_KEYS,
+} from "../shared/browser";
+import { JPEG_QUALITY } from "../shared/capture-settings";
 import { type BrowserRuntimeClient, SessionManager } from "./browser-policy";
 
 /** Exercise the real policy with a deterministic owned runtime; no browser or services are started. */
@@ -24,6 +29,11 @@ async function fixture(
       calls.push({ operation, input });
       await intercept(operation);
       if (operation === "input.begin") {
+        const expectedInputGeneration = (input as { expectedInputGeneration?: string | null })
+          .expectedInputGeneration;
+        if (expectedInputGeneration != null && expectedInputGeneration !== inputGeneration) {
+          throw new Error("Live browser input attachment changed before binding");
+        }
         pinnedGeneration = inputGeneration;
         pinnedUrl = url;
       }
@@ -119,6 +129,39 @@ const point = (x = 50, y = 40) => ({ x, y, width: 640, height: 400 });
 afterEach(() => vi.useRealTimers());
 
 describe("owned ordered live input", () => {
+  it("rejects a thirty-third distinct held key before native publication and cancels the bounded channel", async () => {
+    const state = await fixture();
+    try {
+      await state.begin();
+      for (let index = 0; index < MAX_HELD_BROWSER_KEYS; index++) {
+        await state.update({
+          kind: "key",
+          type: "down",
+          key: "Unidentified",
+          code: `Unknown${index}`,
+          modifiers: 0,
+          repeat: false,
+        });
+      }
+      await expect(
+        state.update({
+          kind: "key",
+          type: "down",
+          key: "Unidentified",
+          code: "UnknownExtra",
+          modifiers: 0,
+          repeat: false,
+        }),
+      ).rejects.toThrow("Too many simultaneously held");
+      expect(state.calls.filter(({ operation }) => operation === "input.key")).toHaveLength(
+        MAX_HELD_BROWSER_KEYS,
+      );
+      expect(state.calls.filter(({ operation }) => operation === "input.end")).toHaveLength(1);
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
   it("releases held input before a mode-only change with unchanged display dimensions", async () => {
     const state = await fixture();
     try {
@@ -294,7 +337,7 @@ describe("owned ordered live input", () => {
     const before = state.calls.length;
     const reply = await state.manager.beginGesture({
       ...state.context,
-      target: state.target,
+      target: { ...state.target, frameId: "z".repeat(32) },
       pointerKind: "mouse",
     });
     expect(reply).toHaveProperty("admission", "stale-frame");
@@ -329,7 +372,7 @@ describe("owned ordered live input", () => {
         await expect(
           state.manager.beginGesture({
             ...state.context,
-            target: state.target,
+            target: { ...state.target, frameId: "z".repeat(32) },
             pointerKind: "mouse",
           }),
         ).rejects.toThrow(failure === "runtime" ? "Runtime read unavailable" : "navigation");
@@ -356,18 +399,91 @@ describe("owned ordered live input", () => {
     state.manager.disconnect();
   });
 
-  it("new presses require a current decoded target; cancellation after a lost reply accepts the old sequence", async () => {
+  it("every independent press needs a fresh decoded receipt; the receipt a press used is spent", async () => {
     const state = await fixture();
-    await state.begin();
-    await expect(
-      state.update({ kind: "down", button: "left", clickCount: 1, point: point() }),
-    ).rejects.toThrow("current frame");
-    expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(false);
-    await state.begin();
-    await state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true);
-    await state.end(true, 1);
-    expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(2);
-    state.manager.disconnect();
+    try {
+      await state.begin();
+      await expect(
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }),
+      ).rejects.toThrow("current frame");
+      expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(false);
+      await state.begin();
+      await state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true);
+      await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
+      // Held release reuses its channel, but the same visible receipt cannot press again.
+      await expect(
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true),
+      ).rejects.toThrow("frame is stale");
+      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+      // A discrete agent press stays strict as well.
+      await expect(
+        state.manager.sendInput({
+          ...state.context,
+          target: state.target,
+          event: { kind: "click", point: point(), button: "left", clickCount: 1 },
+        }),
+      ).rejects.toThrow("frame is stale");
+      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
+  it("a stalled presentation cannot admit a press after its receipt expires, however long control is held", async () => {
+    vi.useFakeTimers();
+    const state = await fixture();
+    try {
+      await state.begin();
+      // Hover keeps the channel and lease alive without revoking the receipt.
+      for (let elapsed = 0; elapsed < 6_000; elapsed += 2_000) {
+        await vi.advanceTimersByTimeAsync(2_000);
+        await state.update({ kind: "move", point: point() });
+      }
+      await expect(
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true),
+      ).rejects.toThrow("frame is stale");
+      expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(false);
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
+  it("an expired or spent receipt cannot reopen a channel, with or without prior admission", async () => {
+    vi.useFakeTimers();
+    const state = await fixture();
+    try {
+      await state.begin();
+      await state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true);
+      await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
+      await state.end();
+      const beforeReopen = state.calls.length;
+      const spent = await state.manager.beginGesture({
+        ...state.context,
+        target: state.target,
+        pointerKind: "mouse",
+      });
+      expect(spent).toHaveProperty("admission", "stale-frame");
+      expect(state.calls.slice(beforeReopen).some((call) => call.operation === "input.begin")).toBe(
+        false,
+      );
+      const fresh = await state.manager.capture(state.context.viewerToken, "low");
+      const freshTarget = {
+        frameId: fresh.frame!.frameId,
+        navigationGeneration: fresh.frame!.navigationGeneration,
+        viewportGeneration: fresh.frame!.viewportGeneration,
+      };
+      await vi.advanceTimersByTimeAsync(5_001);
+      const expired = await state.manager.beginGesture({
+        ...state.context,
+        target: freshTarget,
+        pointerKind: "mouse",
+      });
+      expect(expired).toHaveProperty("admission", "stale-frame");
+      expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(true);
+      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+    } finally {
+      await state.manager.disconnect();
+    }
   });
 
   it("maps native touch coordinates, preserves stable identifiers and accepts partial release via the active set", async () => {
@@ -417,6 +533,130 @@ describe("owned ordered live input", () => {
     ).rejects.toThrow("frame");
     expect(state.calls.filter((call) => call.operation === "touch")).toHaveLength(3);
     state.manager.disconnect();
+  });
+
+  it("never replays an uncertain press and revokes its earlier discrete observation", async () => {
+    const state = await fixture();
+    try {
+      await state.begin();
+      state.intercept(async (operation) => {
+        if (operation === "mouse.down") throw new Error("Unknown publication outcome");
+      });
+      await expect(
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true),
+      ).rejects.toThrow("Unknown publication");
+      await expect(
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true),
+      ).rejects.toThrow("unavailable");
+      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+      expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(1);
+      state.intercept(async () => {});
+      await expect(
+        state.manager.sendInput({
+          ...state.context,
+          target: state.target,
+          event: { kind: "click", point: point(), button: "left", clickCount: 1 },
+        }),
+      ).rejects.toThrow("frame is stale");
+      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
+  it("rejects document replacement between policy preflight and native binding without pressing the replacement", async () => {
+    const state = await fixture();
+    try {
+      state.intercept(async (operation) => {
+        if (operation === "input.begin") state.reloadSameUrl();
+      });
+      await expect(state.begin()).rejects.toThrow("attachment changed before binding");
+      expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(false);
+      const beginCall = state.calls.find((call) => call.operation === "input.begin");
+      expect(beginCall?.input).toMatchObject({ expectedInputGeneration: "0:0" });
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
+  it("discrete input refuses a document that navigated after capture before any native primitive", async () => {
+    const events: BrowserInputEvent[] = [
+      { kind: "type", text: "secret" },
+      { kind: "key", key: "Enter" },
+      { kind: "move", point: point() },
+      { kind: "scroll", point: point(), deltaX: 0, deltaY: 40 },
+      { kind: "click", point: point(), button: "left", clickCount: 1 },
+    ];
+    for (const event of events) {
+      const state = await fixture();
+      try {
+        state.changeUrl("https://fixture.invalid/autonomous-navigation");
+        state.reloadSameUrl();
+        const before = state.calls.length;
+        await expect(
+          state.manager.sendInput({ ...state.context, target: state.target, event }),
+        ).rejects.toThrow("stale");
+        expect(
+          state.calls
+            .slice(before)
+            .filter((call) => /^(text|key|mouse|input\.begin)/.test(call.operation)),
+        ).toEqual([]);
+      } finally {
+        await state.manager.disconnect();
+      }
+    }
+  });
+
+  it("pins the reconciled document at native begin, so a replacement racing the check publishes nothing", async () => {
+    const state = await fixture();
+    try {
+      state.intercept(async (operation) => {
+        if (operation === "input.begin") state.reloadSameUrl();
+      });
+      const before = state.calls.length;
+      await expect(
+        state.manager.sendInput({
+          ...state.context,
+          target: state.target,
+          event: { kind: "type", text: "secret" },
+        }),
+      ).rejects.toThrow("attachment changed before binding");
+      const calls = state.calls.slice(before);
+      expect(calls.find((call) => call.operation === "input.begin")?.input).toMatchObject({
+        expectedInputGeneration: "0:0",
+      });
+      expect(calls.some((call) => call.operation === "text.insert")).toBe(false);
+      expect(calls.some((call) => call.operation === "input.end")).toBe(true);
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
+  it("spends the capture when admitted discrete input fails partway, so it cannot be reused", async () => {
+    const state = await fixture();
+    try {
+      state.intercept(async (operation) => {
+        if (operation === "mouse.up") throw new Error("Runtime failure after press");
+      });
+      await expect(
+        state.manager.sendInput({
+          ...state.context,
+          target: state.target,
+          event: { kind: "click", point: point(), button: "left", clickCount: 1 },
+        }),
+      ).rejects.toThrow("Runtime failure");
+      state.intercept(async () => {});
+      await expect(
+        state.manager.sendInput({
+          ...state.context,
+          target: state.target,
+          event: { kind: "type", text: "again" },
+        }),
+      ).rejects.toThrow("frame is stale");
+      expect(state.calls.filter((call) => call.operation === "text.insert")).toEqual([]);
+    } finally {
+      await state.manager.disconnect();
+    }
   });
 
   it("rejects dropped sequence/layout and never replays an uncertain published packet", async () => {
@@ -580,4 +820,42 @@ it("cancels a held gesture on device mode changes without reloading or inventing
     mobile: true,
     touch: true,
   });
+});
+
+it("threads actual click modifier snapshots through the owned gesture without key synthesis", async () => {
+  const f = await fixture();
+  try {
+    await f.begin();
+    await f.update(
+      { kind: "down", point: point(), button: "left", clickCount: 1, modifiers: 10 },
+      true,
+    );
+    await f.update({ kind: "up", point: point(), button: "left", clickCount: 1, modifiers: 0 });
+    const pointer = f.calls.filter(
+      (call) => call.operation === "mouse.down" || call.operation === "mouse.up",
+    );
+    expect(pointer.map((call) => call.input)).toEqual([
+      expect.objectContaining({ modifiers: 10 }),
+      expect.objectContaining({ modifiers: 0 }),
+    ]);
+    expect(f.calls.some((call) => call.operation === "input.key")).toBe(false);
+    await f.end();
+  } finally {
+    f.manager.disconnect();
+  }
+});
+
+it("requests JPEG100 and JPEG85 independently from the default-quality stream", async () => {
+  const f = await fixture();
+  try {
+    await f.manager.capture(f.context.viewerToken, "maximum");
+    await f.manager.capture(f.context.viewerToken, "high");
+    expect(f.calls.filter((call) => call.operation === "frame").map((call) => call.input)).toEqual([
+      expect.objectContaining({ quality: JPEG_QUALITY.medium }),
+      expect.objectContaining({ quality: JPEG_QUALITY.maximum }),
+      expect.objectContaining({ quality: JPEG_QUALITY.high }),
+    ]);
+  } finally {
+    f.manager.disconnect();
+  }
 });

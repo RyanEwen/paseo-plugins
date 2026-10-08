@@ -32,13 +32,23 @@ function scroll(
   point: BrowserGesturePoint,
   deltaX: number,
   deltaY: number,
+  modifiers?: number,
 ) {
   let remainingX = deltaX;
   let remainingY = deltaY;
   while (Math.abs(remainingX) > 0.001 || Math.abs(remainingY) > 0.001) {
     const x = Math.max(-MAX_SCROLL_DELTA, Math.min(MAX_SCROLL_DELTA, remainingX));
     const y = Math.max(-MAX_SCROLL_DELTA, Math.min(MAX_SCROLL_DELTA, remainingY));
-    if (!options.enqueue({ kind: "scroll", point, deltaX: x, deltaY: y })) return;
+    if (
+      !options.enqueue({
+        kind: "scroll",
+        point,
+        deltaX: x,
+        deltaY: y,
+        ...(modifiers === undefined ? {} : { modifiers }),
+      })
+    )
+      return;
     remainingX -= x;
     remainingY -= y;
   }
@@ -62,16 +72,21 @@ export function createBrowserCanvasInput(options: CanvasInputOptions) {
     reset();
     options.cancel();
   };
-  const mouseMove = (point: BrowserGesturePoint) => {
+  const mouseMove = (point: BrowserGesturePoint, modifiers?: number) => {
     if (!options.enabled()) return false;
     options.onPoint(point);
     if (!mouseButtons.size) options.onActivity(false);
-    return options.enqueue({ kind: "move", point });
+    return options.enqueue({
+      kind: "move",
+      point,
+      ...(modifiers === undefined ? {} : { modifiers }),
+    });
   };
   const mouseDown = (
     point: BrowserGesturePoint,
     button: "left" | "right" | "middle",
     clickCount: 1 | 2,
+    modifiers?: number,
   ) => {
     if (!options.enabled()) return false;
     options.onPoint(point);
@@ -80,6 +95,7 @@ export function createBrowserCanvasInput(options: CanvasInputOptions) {
       point,
       button,
       clickCount,
+      ...(modifiers === undefined ? {} : { modifiers }),
     });
     if (accepted) {
       mouseButtons.add(button);
@@ -91,10 +107,17 @@ export function createBrowserCanvasInput(options: CanvasInputOptions) {
     point: BrowserGesturePoint,
     button: "left" | "right" | "middle",
     clickCount: 1 | 2,
+    modifiers?: number,
   ) => {
     if (!mouseButtons.has(button)) return false;
     options.onPoint(point);
-    const accepted = options.enqueue({ kind: "up", point, button, clickCount });
+    const accepted = options.enqueue({
+      kind: "up",
+      point,
+      button,
+      clickCount,
+      ...(modifiers === undefined ? {} : { modifiers }),
+    });
     mouseButtons.delete(button);
     if (!mouseButtons.size) {
       options.onActivity(false);
@@ -102,7 +125,12 @@ export function createBrowserCanvasInput(options: CanvasInputOptions) {
     }
     return accepted;
   };
-  const wheel = (point: BrowserGesturePoint, deltaX: number, deltaY: number) => {
+  const wheel = (
+    point: BrowserGesturePoint,
+    deltaX: number,
+    deltaY: number,
+    modifiers?: number,
+  ) => {
     if (!options.enabled()) return false;
     const viewport = options.viewport();
     if (!viewport) return false;
@@ -113,6 +141,7 @@ export function createBrowserCanvasInput(options: CanvasInputOptions) {
       point,
       (deltaX * viewport.width) / point.width,
       (deltaY * viewport.height) / point.height,
+      modifiers,
     );
     return true;
   };

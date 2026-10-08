@@ -1,3 +1,7 @@
+import { captureDensitySchema } from "./capture-density";
+
+export { type CaptureDensity, canUseCaptureDensity, captureDensitySchema } from "./capture-density";
+
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import {
@@ -115,7 +119,7 @@ export const captureBrowserRpc = defineRpc({
   name: "shared-browser.capture",
   input: z.object({
     viewerToken: opaqueTokenSchema,
-    quality: z.enum(["low", "medium", "high"]).default(DEFAULT_CAPTURE_QUALITY),
+    quality: z.enum(["low", "medium", "high", "maximum"]).default(DEFAULT_CAPTURE_QUALITY),
     knownFrameId: opaqueTokenSchema.nullable().default(null),
   }),
   output: z.object({
@@ -179,6 +183,18 @@ export const resizeBrowserRpc = defineRpc({
     controlToken: opaqueTokenSchema,
     expected: expectedStateSchema,
     viewport: viewportSchema,
+  }),
+  output: z.object({ state: browserStateSchema }),
+});
+
+/** Independent, controller-authorized density selection; no page navigation or preset substitution. */
+export const setCaptureDensityRpc = defineRpc({
+  name: "shared-browser.capture.density",
+  input: z.object({
+    viewerToken: opaqueTokenSchema,
+    controlToken: opaqueTokenSchema,
+    expected: expectedStateSchema,
+    density: captureDensitySchema,
   }),
   output: z.object({ state: browserStateSchema }),
 });
@@ -312,6 +328,9 @@ const touchPointSchema = displayedPointSchema.extend({
   id: z.number().int().min(0).max(2_147_483_647),
 });
 /** Native keyboard modifiers use CDP's bits: Alt 1, Control 2, Meta 4, Shift 8. */
+/** Bound simultaneous physical-key cleanup work without restricting layout codes. */
+export const MAX_HELD_BROWSER_KEYS = 32;
+
 export const browserGestureKeySchema = z
   .object({
     kind: z.literal("key"),
@@ -341,26 +360,36 @@ export type BrowserGestureKeyEvent = z.output<typeof browserGestureKeySchema>;
  * the complete active ID set; removing contacts in move releases those contacts.
  * End/cancel contain no points. Wheel deltas are bounded browser CSS pixels.
  */
+// Pointer snapshots use the same CDP modifier bits as key events. Omission
+// preserves native/older callers' held-key inference; explicit zero means none.
+const pointerModifiersSchema = z.number().int().min(0).max(15).optional();
 export const browserGestureEventSchema = z.discriminatedUnion("kind", [
   browserGestureKeySchema,
   z.object({ kind: z.literal("text"), text: z.string().min(1).max(16_000) }),
   z.object({ kind: z.literal("leave") }),
-  z.object({ kind: z.literal("move"), point: displayedPointSchema }),
+  z.object({
+    kind: z.literal("move"),
+    point: displayedPointSchema,
+    modifiers: pointerModifiersSchema,
+  }),
   z.object({
     kind: z.literal("down"),
     point: displayedPointSchema,
+    modifiers: pointerModifiersSchema,
     button: z.enum(["left", "right", "middle"]).default("left"),
     clickCount: z.union([z.literal(1), z.literal(2)]).default(1),
   }),
   z.object({
     kind: z.literal("up"),
     point: displayedPointSchema,
+    modifiers: pointerModifiersSchema,
     button: z.enum(["left", "right", "middle"]).default("left"),
     clickCount: z.union([z.literal(1), z.literal(2)]).default(1),
   }),
   z.object({
     kind: z.literal("scroll"),
     point: displayedPointSchema,
+    modifiers: pointerModifiersSchema,
     deltaX: z.number().finite().min(-4_000).max(4_000),
     deltaY: z.number().finite().min(-4_000).max(4_000),
   }),

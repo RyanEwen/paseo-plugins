@@ -32,7 +32,7 @@ vi.mock("node:child_process", async (importOriginal) => ({
       cli.closes += 1;
       cli.onClose?.();
     }
-    callback(null, { stdout: args.includes("--version") ? "0.37.1\n" : "{}\n" });
+    callback(null, { stdout: args.includes("--version") ? "0.38.2\n" : "{}\n" });
   },
 }));
 

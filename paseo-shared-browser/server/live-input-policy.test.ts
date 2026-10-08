@@ -3,7 +3,7 @@ import type { BrowserGestureEvent } from "../shared/browser";
 import { type BrowserRuntimeClient, SessionManager } from "./browser-policy";
 
 /** Exercise the real policy with a deterministic owned runtime; no browser or services are started. */
-async function fixture() {
+async function fixture(timing: { now?: () => number; viewerTtlMs?: number; controlLeaseMs?: number } = {}) {
   let counter = 0;
   let url = "https://fixture.invalid/";
   let inputGeneration = "0:0";
@@ -51,6 +51,7 @@ async function fixture() {
     validateWorkspace: async () => true,
     client,
     issueToken: () => (++counter).toString().padStart(32, "0"),
+    ...timing,
   });
   await manager.connect();
   const { viewerToken } = await manager.attach("owned-workspace", "Viewer");
@@ -493,6 +494,30 @@ describe("owned ordered live input", () => {
       else
         await state.manager.releaseControl(state.context.viewerToken, state.context.controlToken);
       expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(1);
+      state.manager.disconnect();
+    }
+  });
+
+  it("viewer or lease expiry releases the held gesture and rejects its late events", async () => {
+    for (const expiry of ["lease", "viewer"] as const) {
+      let now = 1_000;
+      const state = await fixture({
+        now: () => now,
+        ...(expiry === "lease" ? { controlLeaseMs: 1_000 } : { viewerTtlMs: 1_000 }),
+      });
+      await state.begin();
+      await state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true);
+      now += 1_001;
+      // Another viewer's request is what observes the expiry; no request of the holder is needed.
+      await state.manager.attach("owned-workspace", "Other");
+      await vi.waitFor(() =>
+        expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(1),
+      );
+      const before = state.calls.length;
+      await expect(state.update({ kind: "move", point: point(60, 50) })).rejects.toThrow();
+      expect(
+        state.calls.slice(before).filter((call) => call.operation.startsWith("mouse.")),
+      ).toEqual([]);
       state.manager.disconnect();
     }
   });

@@ -278,6 +278,56 @@ it("shares and persists a production agent-browser runtime across supervisor cli
       },
     });
     await vi.waitFor(() => expect(clicked).toBe(1));
+
+    // Two consecutive human presses on the JPEG path, each from its own freshly
+    // decoded receipt. An acknowledged press spends the receipt it used.
+    const humanPress = async (frame: BrowserFrame, state: BrowserState) => {
+      const context = {
+        viewerToken: first.viewerToken,
+        controlToken: firstControl.controlToken,
+        expected: {
+          ...expected(state),
+          runtimeId: state.runtimeId!,
+          bridgeEpoch: state.bridgeEpoch!,
+        },
+      };
+      const begun = await manager.beginGesture({
+        ...context,
+        target: target(frame),
+        pointerKind: "mouse",
+      });
+      if (!("gestureId" in begun) || typeof begun.nextSequence !== "number") return false;
+      const point = { x: 370, y: 46, width: 1280, height: 800 };
+      const down = await manager.updateGesture({
+        ...context,
+        gestureId: begun.gestureId,
+        sequence: begun.nextSequence,
+        target: target(frame),
+        event: { kind: "down", point, button: "left", clickCount: 1 },
+      });
+      const up = await manager.updateGesture({
+        ...context,
+        gestureId: begun.gestureId,
+        sequence: down.nextSequence,
+        event: { kind: "up", point, button: "left", clickCount: 1 },
+      });
+      await manager.endGesture({
+        ...context,
+        gestureId: begun.gestureId,
+        sequence: up.nextSequence,
+        cancel: false,
+      });
+      return true;
+    };
+    const pressFrameOne = await manager.capture(first.viewerToken, "medium", null);
+    expect(await humanPress(pressFrameOne.frame!, pressFrameOne.state)).toBe(true);
+    await vi.waitFor(() => expect(clicked).toBe(2));
+    expect(await humanPress(pressFrameOne.frame!, pressFrameOne.state)).toBe(false);
+    expect(clicked).toBe(2);
+    const pressFrameTwo = await manager.capture(first.viewerToken, "medium", null);
+    expect(pressFrameTwo.frame?.frameId).not.toBe(pressFrameOne.frame?.frameId);
+    expect(await humanPress(pressFrameTwo.frame!, pressFrameTwo.state)).toBe(true);
+    await vi.waitFor(() => expect(clicked).toBe(3));
     console.log("browser-smoke: input");
 
     const afterNavigation = await manager.navigate({

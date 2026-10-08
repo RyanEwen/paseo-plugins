@@ -33,7 +33,7 @@ export interface NativeVideoRead {
   streamId: string | null;
   packets: RuntimeVideoPacket[];
   reason?: string;
-  reasonCode?: "encoder-capacity";
+  reasonCode?: "encoder-capacity" | "video-disabled";
 }
 interface EncoderState {
   streamId: string;

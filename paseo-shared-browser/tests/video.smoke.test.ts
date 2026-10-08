@@ -197,6 +197,7 @@ async function proveNativeVideo(pointerKind: "mouse" | "touch") {
     vi.stubEnv("PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE", executablePath);
     const owner = await createRuntimeOwner({
       initialUrl: `${origin}/source`,
+      nativeVideo: true,
       headed: process.platform === "win32",
     });
     let owned: Awaited<ReturnType<typeof owner.create>> | null = null;

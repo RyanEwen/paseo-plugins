@@ -1,7 +1,7 @@
 /**
  * Single-flight encoded-video reader. RPC waits never overlap per viewer; canceled
- * replies are discarded and cannot restore input against old pixels. Android uses
- * the host video surface; other native hosts keep the existing image path.
+ * replies are discarded and cannot restore input against old pixels. Only web
+ * clients decode video, and only when the host enabled it; others use the image path.
  * Document/AppState suspension releases the decoder and stops reads. A bounded
  * in-flight SDK read cannot be aborted; its result is discarded before resuming.
  * Read failures get three delayed attempts, with failure cleared only by paint.
@@ -331,6 +331,17 @@ export function useBrowserVideo(options: BrowserVideoOptions) {
               lastQuietReadAt = Date.now();
             }
             if (reply.status === "unsupported") {
+              if (reply.reasonCode === "video-disabled") {
+                // Host policy, not a failure: stop reading, release the decoder and
+                // canvas, and leave presentation to the ordinary image path.
+                stopped = true;
+                clearInterval(watchdog);
+                visible.current = false;
+                frontRef.current = null;
+                setFront(null);
+                target.dispose();
+                break;
+              }
               if (reply.reasonCode === "encoder-capacity") {
                 // Capacity is a typed, viewing-only soft failure. Keep JPEG
                 // fallback visible while old idle cohorts can release their slot.

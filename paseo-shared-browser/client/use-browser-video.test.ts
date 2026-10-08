@@ -152,7 +152,7 @@ const packet = (sequence: number): BrowserVideoPacket => ({
 const drain = async () => {
   for (let i = 0; i < 15; i++) await Promise.resolve();
 };
-function setup(retainDocumentDisplay = false) {
+function setup(retainDocumentDisplay = false, panelRejectsDisplayOnly = false) {
   let draw: (() => void) | null = null;
   const presented: number[] = [];
   const drawn: number[] = [];
@@ -212,6 +212,9 @@ function setup(retainDocumentDisplay = false) {
       epoch: () => mutationEpoch,
       viewport: () => ({ width: 1280, height: 800 }),
       isCurrent: (value, epoch) =>
+        // The mounted panel's predicate: source, document and geometry only. The
+        // legacy variant additionally rejected display-only packets (VIDEO-1 repro).
+        (!panelRejectsDisplayOnly || value.actionable !== false) &&
         current &&
         epoch === mutationEpoch &&
         Object.entries(identity).every(
@@ -276,6 +279,19 @@ function setup(retainDocumentDisplay = false) {
         streamId: "s".repeat(32),
         state: {},
         packets: [{ ...packet(sequence), type: keyFrame ? "key" : "delta" }],
+      } as BrowserVideoReadReply);
+    },
+    replyPackets(index: number, sequences: number[], display: number[] = []) {
+      harness.reads[index]!.resolve({
+        status: "ready",
+        streamId: "s".repeat(32),
+        state: {},
+        packets: sequences.map((sequence) => ({
+          ...packet(sequence),
+          type: sequence === 1 ? "key" : "delta",
+          // The host paints these but refuses them as input receipts.
+          ...(display.includes(sequence) ? { actionable: false } : { actionable: true }),
+        })),
       } as BrowserVideoReadReply);
     },
     disabled(index: number) {
@@ -520,6 +536,41 @@ describe("video presentation lifecycle", () => {
     f.commit();
     expect(result.error).toBeNull();
     expect(result.frontRef.current).not.toBeNull();
+  });
+  it("decodes and paints a same-source display-only packet without breaking the delta chain or granting input", async () => {
+    const f = setup();
+    const front: (number | null)[] = [];
+    for (const sequence of [1, 2, 3]) {
+      f.replyPackets(sequence - 1, [sequence], [2]);
+      await drain();
+      f.paint();
+      const result = f.render();
+      f.commit();
+      front.push(result.frontRef.current?.sequence ?? null);
+      await vi.advanceTimersByTimeAsync(41);
+    }
+    // All three packets paint, so the codec chain 1 -> 2 -> 3 is intact.
+    expect(f.drawn).toEqual([1000, 2000, 3000]);
+    // The display-only packet never publishes input authority and does not leave the
+    // older actionable receipt current; the next actionable packet does.
+    expect(f.presented).not.toContain(2);
+    expect(f.presented).toContain(3);
+    expect(front).toEqual([1, null, 3]);
+    // Each read continued the same stream without asking for a recovery keyframe.
+    expect(harness.reads.slice(1, 4).map((read) => read.input.requestKeyFrame)).toEqual([
+      false,
+      false,
+      false,
+    ]);
+  });
+  it("still drops wrong-document display-only packets without decoding or painting them", async () => {
+    const f = setup();
+    f.identity("navigationGeneration", 2);
+    f.replyPackets(0, [1, 2], [2]);
+    await drain();
+    f.paint();
+    expect(f.drawn).toEqual([]);
+    expect(f.presented).toEqual([]);
   });
   it("a host that disabled video stops reads and releases the decoder without an error", async () => {
     const f = setup();

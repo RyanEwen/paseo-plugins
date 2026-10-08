@@ -363,7 +363,6 @@ export function SharedBrowserPanel({
     epoch: () => inputLifecycle.epoch,
     viewport: () => stateRef.current?.viewport ?? null,
     isCurrent: (packet, epoch) =>
-      packet.actionable !== false &&
       mountedRef.current &&
       activeViewerTokenRef.current === viewerToken &&
       epoch === inputLifecycle.epoch &&

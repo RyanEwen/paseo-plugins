@@ -16,10 +16,19 @@ vi.mock("./process-identity", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./process-identity")>();
   return {
     ...actual,
-    probeProcess: (pid: number, nonce: string) =>
-      probe.unreadable
-        ? Promise.resolve({ status: "unknown" as const })
-        : actual.probeProcess(pid, nonce),
+    probeProcess: (pid: number, nonce: string) => {
+      if (probe.unreadable) return Promise.resolve({ status: "unknown" as const });
+      if (!probe.simulated) return actual.probeProcess(pid, nonce);
+      // Simulated ownership (platforms without /proc): a stable start time for owned pids,
+      // real liveness so a killed child is observed absent rather than owned forever.
+      if (!actual.processExists(pid)) return Promise.resolve({ status: "absent" as const });
+      const startTicks = probe.simulated.get(pid);
+      return Promise.resolve(
+        startTicks === undefined
+          ? { status: "foreign" as const }
+          : { status: "owned" as const, identity: { pid, startTicks } },
+      );
+    },
   };
 });
 

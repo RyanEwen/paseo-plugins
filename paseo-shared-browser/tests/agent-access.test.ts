@@ -396,7 +396,6 @@ describe("agent shared-browser authorization", () => {
       },
       { operation: "navigate", input: { action: { kind: "invalid" } } },
       { operation: "viewport", input: { viewport: { width: 0, height: 800 } } },
-      { operation: "device", input: { presetId: "invented-device" } },
     ];
     for (const request of invalid) {
       await expect(

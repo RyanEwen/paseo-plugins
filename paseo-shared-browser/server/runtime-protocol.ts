@@ -37,7 +37,6 @@ export type AgentBrowserOperation =
   | "navigate"
   | "input"
   | "viewport"
-  | "device"
   | "tabs.list"
   | "tabs.create"
   | "tabs.select"
@@ -298,8 +297,7 @@ function requireAgentOperation(value: unknown): AgentBrowserOperation {
     value === "release-control" ||
     value === "navigate" ||
     value === "input" ||
-    value === "viewport" ||
-    value === "device"
+    value === "viewport"
   )
     return value;
   throw new RuntimeProtocolError("INVALID_REQUEST", "Unknown agent browser operation");

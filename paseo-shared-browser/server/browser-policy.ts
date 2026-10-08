@@ -1761,7 +1761,8 @@ export class SessionManager {
     };
   }
 
-  /** A strict discrete press owns one private native cleanup channel. The ID is
+  /** A discrete text, key or press owns one private native channel pinned to the original
+   * attachment and document. The ID is
    * never returned to callers and grants no agent continuation. Native end uses
    * the original page even after navigation, revocation or a lost down ACK. */
   private async dispatchDiscreteInput(
@@ -1769,7 +1770,12 @@ export class SessionManager {
     event: BrowserInputEvent,
     assertTargetCurrent: () => Promise<void>,
   ): Promise<void> {
-    if (event.kind !== "key" && event.kind !== "click" && event.kind !== "drag") {
+    if (
+      event.kind !== "type" &&
+      event.kind !== "key" &&
+      event.kind !== "click" &&
+      event.kind !== "drag"
+    ) {
       await this.dispatchInput(session, event, assertTargetCurrent);
       return;
     }
@@ -1804,7 +1810,10 @@ export class SessionManager {
     }
     await assertTargetCurrent();
     if (event.kind === "type") {
-      await this.request(session, "text.insert", { text: event.text });
+      await this.request(session, "text.insert", {
+        text: event.text,
+        ...(gestureId ? { gestureId } : {}),
+      });
       return;
     }
     if (event.kind === "key") {

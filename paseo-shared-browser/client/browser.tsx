@@ -43,6 +43,7 @@ import {
   updateBrowserGestureRpc,
 } from "../shared/browser";
 import { groupResolutionPresets } from "../shared/resolution-menu";
+import { liveInputAllowed } from "./browser-canvas-input";
 import { type BrowserCanvasDisplayMode, getBrowserCanvasLayout } from "./browser-canvas-layout";
 import { BrowserCanvasViewport } from "./browser-canvas-viewport";
 import { browserCaptureInterval } from "./browser-capture-cadence";
@@ -52,7 +53,6 @@ import { setBrowserControlTooltip } from "./browser-control-tooltip-web";
 import { type EmulationSelection, matchingResolutionPresetId } from "./browser-emulation-mode";
 import type { FrameCandidate } from "./browser-frame-buffer";
 import { BrowserFrameImage } from "./browser-frame-image";
-import { liveInputAllowed } from "./browser-canvas-input";
 import { BrowserResolutionPicker } from "./browser-resolution-picker";
 import {
   BrowserMenuHeading,

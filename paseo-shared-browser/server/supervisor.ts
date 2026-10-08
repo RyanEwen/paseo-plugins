@@ -20,6 +20,7 @@ import {
 } from "../shared/browser";
 import { readBrowserVideoRpc } from "../shared/browser-video";
 import { DEFAULT_CAPTURE_QUALITY } from "../shared/capture-settings";
+import { MAX_AGENT_VIEWPORT } from "../shared/viewport-limits";
 import { SessionManager } from "./browser-policy";
 import { CdpUnknownOutcomeError } from "./cdp";
 import {
@@ -733,14 +734,21 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
           }),
         );
       } else if (operation === "viewport") {
-        result = await this.browserPolicy.resize(
-          parseAgentInput(resizeBrowserRpc.input, {
-            viewerToken,
-            controlToken,
-            expected,
-            viewport: data.viewport,
-          }),
-        );
+        const resize = parseAgentInput(resizeBrowserRpc.input, {
+          viewerToken,
+          controlToken,
+          expected,
+          viewport: data.viewport,
+        });
+        // The shared human schema allows MAX_VIEWPORT; an agent ticket keeps the
+        // smaller original bound, enforced here before any mutation.
+        if (
+          resize.viewport.width > MAX_AGENT_VIEWPORT.width ||
+          resize.viewport.height > MAX_AGENT_VIEWPORT.height
+        ) {
+          throw new RuntimeProtocolError("INVALID_REQUEST", "Invalid agent browser request");
+        }
+        result = await this.browserPolicy.resize(resize);
       } else if (operation === "input") {
         if (!binding.lastFrame)
           throw new RuntimeProtocolError("INVALID_REQUEST", "Capture a frame before sending input");
@@ -781,7 +789,7 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
         ? await this.browserPolicy.status(viewerToken)
         : await this.browserPolicy.capture(
             viewerToken,
-            input.quality === "low" || input.quality === "medium"
+            input.quality === "low" || input.quality === "medium" || input.quality === "high"
               ? input.quality
               : DEFAULT_CAPTURE_QUALITY,
             null,

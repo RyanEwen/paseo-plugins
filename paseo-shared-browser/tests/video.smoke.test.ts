@@ -615,10 +615,10 @@ async function proveNativeVideo(pointerKind: "mouse" | "touch") {
       }
     }
     expect(secondTarget).not.toBeNull();
-    const second = await press(secondTarget!);
-    expect(second.admitted).toBe(true);
-    if (!second.admitted) throw new Error("Second press was not admitted");
-    state = second.state;
+    const secondPress = await press(secondTarget!);
+    expect(secondPress.admitted).toBe(true);
+    if (!secondPress.admitted) throw new Error("Second press was not admitted");
+    state = secondPress.state;
     await vi.waitFor(async () => expect(await clicksSoFar()).toBe(2), { timeout: 2000 });
     expect(state.url).toBe(`${origin}/pending-dom`);
     let ordinaryClickPainted = false;

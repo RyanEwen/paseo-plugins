@@ -3,7 +3,9 @@ import { type BrowserGestureEvent, MAX_HELD_BROWSER_KEYS } from "../shared/brows
 import { type BrowserRuntimeClient, SessionManager } from "./browser-policy";
 
 /** Exercise the real policy with a deterministic owned runtime; no browser or services are started. */
-async function fixture(timing: { now?: () => number; viewerTtlMs?: number; controlLeaseMs?: number } = {}) {
+async function fixture(
+  timing: { now?: () => number; viewerTtlMs?: number; controlLeaseMs?: number } = {},
+) {
   let counter = 0;
   let url = "https://fixture.invalid/";
   let inputGeneration = "0:0";

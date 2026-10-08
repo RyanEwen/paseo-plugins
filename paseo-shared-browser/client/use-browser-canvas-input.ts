@@ -23,10 +23,7 @@ import {
   type BrowserTouchPoint,
   createBrowserInputQueue,
 } from "./browser-input-queue";
-import { useBrowserNativeKeyboard } from "./use-browser-native-keyboard";
 import { type BrowserCanvasNode, bindBrowserCanvasWeb, setBrowserCanvasCursor } from "./web";
-
-const MAX_INSERT_TEXT = 16_000;
 
 interface CanvasOptions {
   authority(): BrowserGestureAuthority | null;
@@ -77,7 +74,6 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
   const alive = useRef(true);
   const inputModel = useRef<ReturnType<typeof createBrowserCanvasInput> | null>(null);
   const keyboard = useRef<ReturnType<typeof bindBrowserCanvasKeyboard> | null>(null);
-  const nativeRelay = useRef<{ reset(): void } | null>(null);
   const cursorVisible = useRef(false);
   const frameWaiters = useRef(
     new Set<{
@@ -109,7 +105,6 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
         // Queue owns cleanup; reset local contacts without recursively cancelling.
         inputModel.current?.reset();
         keyboard.current?.reset();
-        nativeRelay.current?.reset();
         cursorVisible.current = false;
         setBrowserCanvasCursor(nodeRef.current, null);
         clearIdle();
@@ -120,7 +115,6 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
         // holds before state projection; never replay their old-page release.
         inputModel.current?.reset();
         keyboard.current?.reset();
-        nativeRelay.current?.reset();
         cursorVisible.current = false;
         setBrowserCanvasCursor(nodeRef.current, null);
         clearIdle();
@@ -172,7 +166,6 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
       enqueue(event) {
         clearIdle();
         if (event.kind === "down" || (event.kind === "touch" && event.type === "start")) {
-          nativeRelay.current?.reset();
           current.current.onInputBoundary();
         }
         const accepted = queue.enqueue(event);
@@ -194,7 +187,6 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
       cancel: () => {
         clearIdle();
         keyboard.current?.reset();
-        nativeRelay.current?.reset();
         cursorVisible.current = false;
         setBrowserCanvasCursor(nodeRef.current, null);
         queue.cancel();
@@ -230,38 +222,20 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
     clearIdle();
     idleTimer.current = setTimeout(() => queue.finish(), 1_000);
   }, [queue]);
-  /** Explicit human-committed text (optionally followed by Enter) through the validated keyboard queue. */
-  const insertText = useCallback(
-    (text: string, submit = false): boolean => {
+  /** Insert an explicitly committed draft once; false means nothing was admitted. */
+  const composeText = useCallback(
+    (text: string): boolean => {
       if (!alive.current || !current.current.enabled || !text) return false;
-      if (text.length > MAX_INSERT_TEXT) {
-        current.current.onError(
-          new Error(`Text is too long. Send up to ${MAX_INSERT_TEXT} characters at once.`),
-        );
+      if (text.length > 16_000) {
+        current.current.onError(new Error("Text is too long. Send up to 16,000 characters at once."));
         return false;
       }
-      if (!enqueueKeyboard({ kind: "text", text })) return false;
-      if (submit) {
-        const key = { key: "Enter", code: "Enter", modifiers: 0, repeat: false } as const;
-        if (enqueueKeyboard({ kind: "key", type: "down", ...key }))
-          enqueueKeyboard({ kind: "key", type: "up", ...key });
-      }
-      finishKeyboard();
-      return true;
+      const accepted = enqueueKeyboard({ kind: "text", text });
+      if (accepted) finishKeyboard();
+      return accepted;
     },
     [enqueueKeyboard, finishKeyboard],
   );
-  const nativeKeyboard = useBrowserNativeKeyboard({
-    enabled: () => alive.current && current.current.enabled,
-    ownershipKey: options.ownershipKey,
-    enqueue: enqueueKeyboard,
-    finish: finishKeyboard,
-    cancel: input.cancel,
-    onError: (error) => {
-      if (alive.current) current.current.onError(error);
-    },
-  });
-  nativeRelay.current = nativeKeyboard;
 
   const previousOwnership = useRef(options.ownershipKey);
   useLayoutEffect(() => {
@@ -366,7 +340,6 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
     canvasRef,
     panHandlers: Platform.OS === "web" ? {} : panResponder.panHandlers,
     cancel: input.cancel,
-    nativeKeyboard,
-    insertText,
+    composeText,
   };
 }

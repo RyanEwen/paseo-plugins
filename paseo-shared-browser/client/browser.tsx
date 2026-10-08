@@ -46,14 +46,13 @@ import { groupResolutionPresets } from "../shared/resolution-menu";
 import { type BrowserCanvasDisplayMode, getBrowserCanvasLayout } from "./browser-canvas-layout";
 import { BrowserCanvasViewport } from "./browser-canvas-viewport";
 import { browserCaptureInterval } from "./browser-capture-cadence";
+import { ComposeTextControls } from "./browser-compose-controls";
 import { ControlButton, type ControlButtonStyles } from "./browser-control-button";
 import { setBrowserControlTooltip } from "./browser-control-tooltip-web";
 import { type EmulationSelection, matchingResolutionPresetId } from "./browser-emulation-mode";
 import type { FrameCandidate } from "./browser-frame-buffer";
 import { BrowserFrameImage } from "./browser-frame-image";
 import { liveInputAllowed } from "./browser-canvas-input";
-import { ComposeTextSheet } from "./browser-compose-text";
-import { NativeKeyboardControls } from "./browser-native-keyboard-controls";
 import { BrowserResolutionPicker } from "./browser-resolution-picker";
 import {
   BrowserMenuHeading,
@@ -908,13 +907,11 @@ export function SharedBrowserPanel({
     setKeysSubmenuOpen(false);
     setToolbarMenu((current) => (current === menu ? null : menu));
   };
-  const [nativeRequest, setNativeRequest] = useState<{
+  const [composeRequest, setComposeRequest] = useState<{
     id: number;
-    kind: "keyboard";
     ownershipKey: string;
   } | null>(null);
-  const [composeOwner, setComposeOwner] = useState<string | null>(null);
-  const nextNativeRequest = useRef(0);
+  const nextComposeRequest = useRef(0);
   const [activeInput, setActiveInput] = useState(false);
   const [containerSize, setContainerSize] = useState<Size>({ width: 0, height: 0 });
 
@@ -1336,7 +1333,7 @@ export function SharedBrowserPanel({
     },
   });
 
-  const nativeOwnershipKey = JSON.stringify([
+  const composeOwnershipKey = JSON.stringify([
     viewerToken,
     controlToken,
     state?.sessionId,
@@ -1345,24 +1342,14 @@ export function SharedBrowserPanel({
     state?.navigationGeneration,
     state?.viewportGeneration,
   ]);
-  const requestNativeKeyboard = () => {
-    if (!canSendInput) return;
-    nextNativeRequest.current += 1;
-    closeToolbarMenu(false);
-    setNativeRequest({
-      id: nextNativeRequest.current,
-      kind: "keyboard",
-      ownershipKey: nativeOwnershipKey,
-    });
-  };
-  const openCompose = () => {
+  const requestCompose = () => {
     if (!canSendInput) return;
     closeToolbarMenu(false);
-    setComposeOwner(nativeOwnershipKey);
+    nextComposeRequest.current += 1;
+    setComposeRequest({ id: nextComposeRequest.current, ownershipKey: composeOwnershipKey });
   };
-  const closeCompose = useCallback(() => setComposeOwner(null), []);
-  const nativeRequestHandled = useCallback((id: number) => {
-    setNativeRequest((current) => (current?.id === id ? null : current));
+  const composeRequestHandled = useCallback((id: number) => {
+    setComposeRequest((current) => (current?.id === id ? null : current));
   }, []);
 
   const handleCanvasLayout = useCallback((event: LayoutChangeEvent) => {
@@ -1789,23 +1776,15 @@ export function SharedBrowserPanel({
         </View>
       </View>
 
-      {layout.platform !== "web" ? (
-        <NativeKeyboardControls
-          relay={canvasInput.nativeKeyboard}
-          enabled={canSendInput}
-          ownershipKey={nativeOwnershipKey}
-          request={nativeRequest}
-          onRequestHandled={nativeRequestHandled}
-        />
-      ) : null}
-      <ComposeTextSheet
+      <ComposeTextControls
         styles={styles}
         theme={theme}
-        ownerKey={composeOwner}
-        ownershipKey={nativeOwnershipKey}
+        composeText={canvasInput.composeText}
+        cancelInput={canvasInput.cancel}
         enabled={canSendInput}
-        onInsert={canvasInput.insertText}
-        onClose={closeCompose}
+        ownershipKey={composeOwnershipKey}
+        request={composeRequest}
+        onRequestHandled={composeRequestHandled}
       />
 
       <Modal
@@ -1929,7 +1908,6 @@ export function SharedBrowserPanel({
                       label={label}
                       disabled={!canSendInput}
                       onPress={() => {
-                        canvasInput.nativeKeyboard.reset();
                         sendEvent({ kind: "key", key });
                       }}
                     />
@@ -2012,16 +1990,6 @@ export function SharedBrowserPanel({
             </>
           ) : (
             <>
-              {layout.platform !== "web" ? (
-                <BrowserMenuItem
-                  theme={theme}
-                  compact={layout.compact}
-                  label="Keyboard"
-                  icon="Keyboard"
-                  disabled={!canSendInput}
-                  onPress={requestNativeKeyboard}
-                />
-              ) : null}
               {layout.platform !== "web" || layout.compact ? (
                 <BrowserMenuItem
                   theme={theme}
@@ -2029,7 +1997,7 @@ export function SharedBrowserPanel({
                   label="Compose text"
                   icon="Pencil"
                   disabled={!canSendInput}
-                  onPress={openCompose}
+                  onPress={requestCompose}
                 />
               ) : null}
               <View ref={keysAnchorRef}>

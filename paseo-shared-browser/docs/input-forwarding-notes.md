@@ -14,12 +14,9 @@ The web relay uses DOM composition and insertion evidence to avoid duplicate or
 lost text. Tab changes remote focus while the local relay keeps receiving keys.
 Paseo inputs outside the focused canvas remain local.
 
-Native phone typing uses an invisible TextInput with autocorrection disabled.
-Only basic append/backspace operations are live. Complex IME text is composed
-locally and inserted once with Done. React Native provides no portable explicit
-composition-commit boundary; replacement diffs must not delete unknown remote
-text. Android TextInput key callbacks do not expose the full hardware-key stream.
-Phone hardware shortcuts therefore remain unverified and unsupported by this relay.
+Native phone typing has no live software-keyboard relay: it is unverified on
+physical devices. Text is composed locally in a visible field and inserted once
+by an explicit Send or Done. Phone hardware shortcuts are unsupported.
 
 Local plain-text paste is forwarded. Copy/cut target the remote browser clipboard;
 there is no remote-to-local clipboard synchronization. Browser and operating-system

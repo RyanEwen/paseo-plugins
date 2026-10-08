@@ -6,7 +6,13 @@ import { RuntimeSupervisor } from "./supervisor";
 /** Only an explicit human attach replaces a runtime whose private display died, behind a new fence. */
 function harness() {
   const events: string[] = [];
-  const control = { created: 0, lostRuntime: 0, genericFailure: false, clock: 1_000 };
+  const control = {
+    created: 0,
+    lostRuntime: 0,
+    genericFailure: false,
+    stopFails: false,
+    clock: 1_000,
+  };
   const supervisor = new RuntimeSupervisor({
     now: () => control.clock,
     owner: {
@@ -44,6 +50,7 @@ function harness() {
       },
       stop: async (runtime) => {
         events.push(`stop:${runtime.id}`);
+        if (control.stopFails) throw new Error("fixture stop unconfirmed");
       },
     },
   });
@@ -226,6 +233,60 @@ describe("display loss recovery", () => {
       expect(h.control.created).toBe(2);
       expect(h.events.filter((event) => event.startsWith("stop"))).toEqual(["stop:1"]);
       expect(human.viewerToken).toBeTruthy();
+    } finally {
+      await h.supervisor.stopAll();
+    }
+  });
+
+  it("keeps a lost runtime whose stop failed away from implicit agent paths until explicit recovery", async () => {
+    const h = harness();
+    const ticket = `agent_${"x".repeat(40)}`;
+    const base = { version: 2 as const, token: "unused", bridgeId: "bridge", epoch: h.lease.epoch };
+    const agentRequest = (operation: "status" | "capture") =>
+      h.supervisor.dispatch({
+        id: "agent",
+        version: 2,
+        method: "agent.request",
+        ticket,
+        operation,
+        input: {},
+      });
+    try {
+      await h.attach();
+      h.control.lostRuntime = 1;
+      h.control.stopFails = true;
+      // The explicit reconnect discards its session, then cannot confirm the old runtime stopped.
+      await expect(h.attach()).rejects.toThrow("stop unconfirmed");
+      const stopsAfterFailure = h.count("stop");
+      expect(h.control.created).toBe(1);
+
+      await h.supervisor.dispatch({ ...base, id: "t1", method: "ticket.issue", ticket });
+      await h.supervisor.dispatch({
+        ...base,
+        id: "t2",
+        method: "ticket.bind",
+        ticket,
+        agentId: "agent-one",
+        workspaceId: "workspace",
+      });
+      await expect(agentRequest("status")).rejects.toMatchObject({ code: "RUNTIME_LOST" });
+      await expect(agentRequest("capture")).rejects.toMatchObject({ code: "RUNTIME_LOST" });
+      // Protocol-level ensure carries no replacement authority either.
+      await expect(
+        h.supervisor.dispatch({
+          ...base,
+          id: "ensure",
+          method: "workspace.ensure",
+          workspaceId: "workspace",
+        }),
+      ).rejects.toMatchObject({ code: "RUNTIME_LOST" });
+      expect(h.count("stop")).toBe(stopsAfterFailure);
+      expect(h.control.created).toBe(1);
+
+      h.control.stopFails = false;
+      const recovered = browserStateSchema.parse((await h.attach()).state);
+      expect(recovered.status).toBe("ready");
+      expect(h.control.created).toBe(2);
     } finally {
       await h.supervisor.stopAll();
     }

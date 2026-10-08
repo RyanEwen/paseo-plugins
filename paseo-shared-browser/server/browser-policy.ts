@@ -58,7 +58,11 @@ const RUNTIME_FRAME_MAX_BYTES = 750_000;
 
 export interface BrowserRuntimeClient {
   connect(): Promise<{ epoch: number }>;
-  ensureWorkspace(workspaceId: string): Promise<{
+  /** `replaceLost` is internal authority; without it a lost runtime is reported, never replaced. */
+  ensureWorkspace(
+    workspaceId: string,
+    options?: { replaceLost?: boolean },
+  ): Promise<{
     workspaceId: string;
     runtimeId: string;
     createdAt: number;
@@ -231,7 +235,7 @@ export class SessionManager {
     const validation = await this.validateWorkspace(workspaceId);
     if (validation === false) throw new Error("Workspace not found");
     this.assertOpen();
-    let session = await this.getOrCreateSession(workspaceId);
+    let session = await this.getOrCreateSession(workspaceId, options.replaceLost === true);
     let replaced = false;
     if (session.runtimeLost && options.replaceLost) {
       session = await this.replaceLostSession(session);
@@ -249,7 +253,7 @@ export class SessionManager {
   /** Discards the dead session behind a fresh session id and runtime id; nothing is replayed. */
   private async replaceLostSession(lost: BrowserSession): Promise<BrowserSession> {
     await this.discardSession(lost);
-    return this.getOrCreateSession(lost.workspaceId);
+    return this.getOrCreateSession(lost.workspaceId, true);
   }
 
   private attachViewer(
@@ -826,7 +830,10 @@ export class SessionManager {
     this.reset();
   }
 
-  private async getOrCreateSession(workspaceId: string): Promise<BrowserSession> {
+  private async getOrCreateSession(
+    workspaceId: string,
+    replaceLost = false,
+  ): Promise<BrowserSession> {
     if (this.archived.has(workspaceId)) throw new Error("Workspace was archived");
     const existing = this.sessions.get(workspaceId);
     if (existing) return existing;
@@ -835,7 +842,7 @@ export class SessionManager {
     if (this.sessions.size + this.sessionCreations.size >= this.maxSessions)
       throw new Error(`Shared browser session limit (${this.maxSessions}) reached`);
     const lifecycleGeneration = this.lifecycleGeneration;
-    const creation = this.createSession(workspaceId);
+    const creation = this.createSession(workspaceId, replaceLost);
     this.sessionCreations.set(workspaceId, creation);
     try {
       const session = await creation;
@@ -862,10 +869,10 @@ export class SessionManager {
     }
   }
 
-  private async createSession(workspaceId: string): Promise<BrowserSession> {
+  private async createSession(workspaceId: string, replaceLost: boolean): Promise<BrowserSession> {
     let ensured = false;
     try {
-      const descriptor = await this.client.ensureWorkspace(workspaceId);
+      const descriptor = await this.client.ensureWorkspace(workspaceId, { replaceLost });
       ensured = true;
       const identity = asRecord(await this.client.requestWorkspace(workspaceId, "identity", null));
       const userAgent = boundedText(String(identity.userAgent ?? "Chromium"), 512);

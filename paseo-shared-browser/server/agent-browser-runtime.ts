@@ -320,6 +320,9 @@ export class AgentBrowserRuntime {
     ]);
     await this.assertVersion();
     const chromiumArguments = process.env.PASEO_SHARED_BROWSER_CHROMIUM_ARGS;
+    // From here a nonce-owned daemon may exist even if open rejects (e.g. navigation failure).
+    this.daemonLaunched = true;
+    this.daemon = null;
     const opened = await this.invoke([
       "--session",
       this.session,
@@ -336,8 +339,6 @@ export class AgentBrowserRuntime {
       this.initialUrl,
     ]);
     const targetId = findString(opened, ["targetId", "target_id"]);
-    this.daemonLaunched = true;
-    this.daemon = null;
     await this.protectIpcMetadata();
     await this.captureDaemon();
     await this.connectCdp(targetId);

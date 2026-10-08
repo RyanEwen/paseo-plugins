@@ -99,11 +99,20 @@ export async function createRuntimeOwner(
         display?.assertAvailable();
         return { runtimeId: randomUUID(), runtime, display, displayNotice };
       } catch (error) {
+        let cleanupFailure: unknown = null;
         try {
           await runtime?.shutdown();
+        } catch (failure) {
+          cleanupFailure = failure;
         } finally {
           await display?.stop();
         }
+        // An unconfirmed cleanup must not hide why creation failed.
+        if (cleanupFailure)
+          throw new AggregateError(
+            [error, cleanupFailure],
+            `Runtime creation failed (${error instanceof Error ? error.message : String(error)}) and its cleanup was not confirmed`,
+          );
         throw error;
       }
     },

@@ -88,6 +88,8 @@ class FakeSupervisorClient {
       case "text.insert":
       case "key.down":
       case "key.up":
+      case "input.begin":
+      case "input.end":
         return null;
       case "emulate":
         workspace.viewport = {

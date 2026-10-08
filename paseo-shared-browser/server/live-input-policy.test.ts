@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type BrowserGestureEvent, MAX_HELD_BROWSER_KEYS } from "../shared/browser";
+import { JPEG_QUALITY } from "../shared/capture-settings";
 import { type BrowserRuntimeClient, SessionManager } from "./browser-policy";
 
 /** Exercise the real policy with a deterministic owned runtime; no browser or services are started. */
@@ -491,19 +492,23 @@ describe("owned ordered live input", () => {
     state.manager.disconnect();
   });
 
-  it("admits repeated human clicks without new media while discrete input still requires a fresh receipt", async () => {
+  it("every independent press needs a fresh decoded receipt; the receipt a press used is spent", async () => {
     const state = await fixture();
     try {
       await state.begin();
-      const capturesBefore = state.calls.filter((call) => call.operation === "frame").length;
-      for (let click = 0; click < 2; click += 1) {
-        await state.update({ kind: "down", button: "left", clickCount: 1, point: point() });
-        await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
-      }
-      expect(state.calls.filter((call) => call.operation === "frame")).toHaveLength(capturesBefore);
-      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(2);
-      expect(state.calls.filter((call) => call.operation === "mouse.up")).toHaveLength(2);
-      const beforeDiscrete = state.calls.length;
+      await expect(
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }),
+      ).rejects.toThrow("current frame");
+      expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(false);
+      await state.begin();
+      await state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true);
+      await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
+      // Held release reuses its channel, but the same visible receipt cannot press again.
+      await expect(
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true),
+      ).rejects.toThrow("frame is stale");
+      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+      // A discrete agent press stays strict as well.
       await expect(
         state.manager.sendInput({
           ...state.context,
@@ -511,10 +516,64 @@ describe("owned ordered live input", () => {
           event: { kind: "click", point: point(), button: "left", clickCount: 1 },
         }),
       ).rejects.toThrow("frame is stale");
-      expect(state.calls).toHaveLength(beforeDiscrete);
-      // Lost-reply cancellation remains exact-channel cleanup, not a replay.
-      await state.end(true, 1);
-      expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(1);
+      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
+  it("a stalled presentation cannot admit a press after its receipt expires, however long control is held", async () => {
+    vi.useFakeTimers();
+    const state = await fixture();
+    try {
+      await state.begin();
+      // Hover keeps the channel and lease alive without revoking the receipt.
+      for (let elapsed = 0; elapsed < 6_000; elapsed += 2_000) {
+        await vi.advanceTimersByTimeAsync(2_000);
+        await state.update({ kind: "move", point: point() });
+      }
+      await expect(
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true),
+      ).rejects.toThrow("frame is stale");
+      expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(false);
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
+  it("an expired or spent receipt cannot reopen a channel, with or without prior admission", async () => {
+    vi.useFakeTimers();
+    const state = await fixture();
+    try {
+      await state.begin();
+      await state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true);
+      await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
+      await state.end();
+      const beforeReopen = state.calls.length;
+      const spent = await state.manager.beginGesture({
+        ...state.context,
+        target: state.target,
+        pointerKind: "mouse",
+      });
+      expect(spent).toHaveProperty("admission", "stale-frame");
+      expect(state.calls.slice(beforeReopen).some((call) => call.operation === "input.begin")).toBe(
+        false,
+      );
+      const fresh = await state.manager.capture(state.context.viewerToken, "low");
+      const freshTarget = {
+        frameId: fresh.frame!.frameId,
+        navigationGeneration: fresh.frame!.navigationGeneration,
+        viewportGeneration: fresh.frame!.viewportGeneration,
+      };
+      await vi.advanceTimersByTimeAsync(5_001);
+      const expired = await state.manager.beginGesture({
+        ...state.context,
+        target: freshTarget,
+        pointerKind: "mouse",
+      });
+      expect(expired).toHaveProperty("admission", "stale-frame");
+      expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(true);
+      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
     } finally {
       await state.manager.disconnect();
     }
@@ -549,7 +608,7 @@ describe("owned ordered live input", () => {
     state.manager.disconnect();
   });
 
-  it("accepts staggered fingers and a later independent touch within the admitted channel without new media", async () => {
+  it("accepts a staggered second finger within one held gesture, but refuses a new independent start from an old frame", async () => {
     const state = await fixture();
     await state.begin("touch");
     await state.update({ kind: "touch", type: "start", points: [{ ...point(), id: 1 }] }, true);
@@ -562,40 +621,11 @@ describe("owned ordered live input", () => {
       ],
     });
     await state.update({ kind: "touch", type: "end", points: [] });
-    await state.update({ kind: "touch", type: "start", points: [{ ...point(), id: 3 }] });
-    await state.update({ kind: "touch", type: "end", points: [] });
-    expect(state.calls.filter((call) => call.operation === "touch")).toHaveLength(5);
+    await expect(
+      state.update({ kind: "touch", type: "start", points: [{ ...point(), id: 3 }] }, true),
+    ).rejects.toThrow("frame");
+    expect(state.calls.filter((call) => call.operation === "touch")).toHaveLength(3);
     state.manager.disconnect();
-  });
-
-  it("refuses a later press after controller, document, viewport or native attachment replacement", async () => {
-    for (const replacement of ["controller", "document", "viewport", "attachment"] as const) {
-      const state = await fixture();
-      try {
-        await state.begin();
-        await state.update({ kind: "down", button: "left", clickCount: 1, point: point() });
-        await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
-
-        if (replacement === "controller") {
-          const other = await state.manager.attach("owned-workspace", "Other");
-          await state.manager.acquireControl(other.viewerToken, true);
-        } else if (replacement === "document") {
-          state.reloadSameUrl();
-        } else if (replacement === "viewport") {
-          await state.manager.applyDevicePreset({ ...state.context, presetId: "pixel-7" });
-        } else {
-          state.replaceTarget();
-        }
-
-        await expect(
-          state.update({ kind: "down", button: "left", clickCount: 1, point: point() }),
-        ).rejects.toThrow();
-        expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
-        expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(1);
-      } finally {
-        await state.manager.disconnect();
-      }
-    }
   });
 
   it("never replays an uncertain press and revokes its earlier discrete observation", async () => {
@@ -606,10 +636,10 @@ describe("owned ordered live input", () => {
         if (operation === "mouse.down") throw new Error("Unknown publication outcome");
       });
       await expect(
-        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }),
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true),
       ).rejects.toThrow("Unknown publication");
       await expect(
-        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }),
+        state.update({ kind: "down", button: "left", clickCount: 1, point: point() }, true),
       ).rejects.toThrow("unavailable");
       expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(1);
       expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(1);
@@ -627,132 +657,18 @@ describe("owned ordered live input", () => {
     }
   });
 
-  it("reopens the original admitted geometry after idle retirement and receipt expiry with media blocked", async () => {
-    vi.useFakeTimers();
-    const state = await fixture();
-    try {
-      await state.begin();
-      await state.update({ kind: "down", button: "left", clickCount: 1, point: point() });
-      await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
-      const capturesBefore = state.calls.filter((call) => call.operation === "frame").length;
-      await vi.advanceTimersByTimeAsync(5_001);
-      expect(state.calls.filter((call) => call.operation === "input.end")).toHaveLength(1);
-      const beforeBegin = state.calls.length;
-      state.intercept(async (operation) => {
-        if (operation === "state" || operation === "frame")
-          throw new Error("Media and metadata are blocked");
-      });
-      const readmission = await state.manager.beginGesture({
-        ...state.context,
-        target: state.target,
-        pointerKind: "mouse",
-      });
-      expect(readmission).toHaveProperty("gestureId");
-      expect(
-        state.calls.slice(beforeBegin).filter((call) => call.operation === "input.begin"),
-      ).toHaveLength(1);
-      if (
-        typeof readmission.gestureId !== "string" ||
-        typeof readmission.nextSequence !== "number"
-      ) {
-        throw new Error("Expected retained geometry admission");
-      }
-      await state.manager.updateGesture({
-        ...state.context,
-        gestureId: readmission.gestureId,
-        sequence: readmission.nextSequence,
-        event: { kind: "down", button: "left", clickCount: 1, point: point() },
-      });
-      expect(state.calls.filter((call) => call.operation === "mouse.down")).toHaveLength(2);
-      expect(state.calls.filter((call) => call.operation === "frame")).toHaveLength(capturesBefore);
-    } finally {
-      await state.manager.disconnect();
-    }
-  });
-
-  it("only reopens from the server-admitted original receipt, never an arbitrary caller frame", async () => {
-    const state = await fixture();
-    try {
-      await state.begin();
-      await state.update({ kind: "down", button: "left", clickCount: 1, point: point() });
-      await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
-      await state.end();
-      const beforeBegin = state.calls.length;
-      const reply = await state.manager.beginGesture({
-        ...state.context,
-        target: { ...state.target, frameId: "z".repeat(32) },
-        pointerKind: "mouse",
-      });
-      expect(reply).toHaveProperty("admission", "stale-frame");
-      expect(state.calls.slice(beforeBegin).some((call) => call.operation === "input.begin")).toBe(
-        false,
-      );
-    } finally {
-      await state.manager.disconnect();
-    }
-  });
-
-  it("does not carry admitted geometry into a new controller lease or a replaced native document", async () => {
-    for (const replacement of ["controller", "document", "attachment"] as const) {
-      const state = await fixture();
-      try {
-        await state.begin();
-        await state.update({ kind: "down", button: "left", clickCount: 1, point: point() });
-        await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
-        await state.end();
-        const beforeReopen = state.calls.length;
-        if (replacement === "controller") {
-          await state.manager.releaseControl(state.context.viewerToken, state.context.controlToken);
-          const renewed = await state.manager.acquireControl(state.context.viewerToken);
-          const reply = await state.manager.beginGesture({
-            ...state.context,
-            controlToken: renewed.controlToken,
-            target: state.target,
-            pointerKind: "mouse",
-          });
-          expect(reply).toHaveProperty("admission", "stale-frame");
-          expect(
-            state.calls.slice(beforeReopen).some((call) => call.operation === "input.begin"),
-          ).toBe(false);
-        } else {
-          if (replacement === "document") state.reloadSameUrl();
-          else state.replaceTarget();
-          await expect(state.begin()).rejects.toThrow("attachment changed before binding");
-        }
-        expect(
-          state.calls.slice(beforeReopen).some((call) => call.operation === "mouse.down"),
-        ).toBe(false);
-      } finally {
-        await state.manager.disconnect();
-      }
-    }
-  });
-
   it("rejects document replacement between policy preflight and native binding without pressing the replacement", async () => {
-    for (const retained of [false, true]) {
-      const state = await fixture();
-      try {
-        if (retained) {
-          await state.begin();
-          await state.update({ kind: "down", button: "left", clickCount: 1, point: point() });
-          await state.update({ kind: "up", button: "left", clickCount: 1, point: point() });
-          await state.end();
-        }
-        state.intercept(async (operation) => {
-          if (operation === "input.begin") state.reloadSameUrl();
-        });
-        const beforeBegin = state.calls.length;
-        await expect(state.begin()).rejects.toThrow("attachment changed before binding");
-        expect(state.calls.slice(beforeBegin).some((call) => call.operation === "mouse.down")).toBe(
-          false,
-        );
-        const beginCall = state.calls
-          .slice(beforeBegin)
-          .find((call) => call.operation === "input.begin");
-        expect(beginCall?.input).toMatchObject({ expectedInputGeneration: "0:0" });
-      } finally {
-        await state.manager.disconnect();
-      }
+    const state = await fixture();
+    try {
+      state.intercept(async (operation) => {
+        if (operation === "input.begin") state.reloadSameUrl();
+      });
+      await expect(state.begin()).rejects.toThrow("attachment changed before binding");
+      expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(false);
+      const beginCall = state.calls.find((call) => call.operation === "input.begin");
+      expect(beginCall?.input).toMatchObject({ expectedInputGeneration: "0:0" });
+    } finally {
+      await state.manager.disconnect();
     }
   });
 
@@ -942,14 +858,15 @@ it("threads actual click modifier snapshots through the owned gesture without ke
   }
 });
 
-it("requests JPEG100 independently from the cached default JPEG95", async () => {
+it("requests JPEG100 and JPEG85 independently from the default-quality stream", async () => {
   const f = await fixture();
   try {
     await f.manager.capture(f.context.viewerToken, "maximum");
     await f.manager.capture(f.context.viewerToken, "high");
     expect(f.calls.filter((call) => call.operation === "frame").map((call) => call.input)).toEqual([
-      expect.objectContaining({ quality: 95 }),
-      expect.objectContaining({ quality: 100 }),
+      expect.objectContaining({ quality: JPEG_QUALITY.medium }),
+      expect.objectContaining({ quality: JPEG_QUALITY.maximum }),
+      expect.objectContaining({ quality: JPEG_QUALITY.high }),
     ]);
   } finally {
     f.manager.disconnect();

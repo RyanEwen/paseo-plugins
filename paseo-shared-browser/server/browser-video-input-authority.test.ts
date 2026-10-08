@@ -133,7 +133,8 @@ it.each([-1, 0, 40])(
         expected,
         target,
       });
-      expect(reopened).toHaveProperty("gestureId");
+      // The scroll spent this receipt; reopening on it is a known non-admission.
+      expect(reopened).toHaveProperty("admission", "stale-frame");
       const strictInput = () =>
         manager.sendInput({
           viewerToken,
@@ -174,7 +175,7 @@ it.each([-1, 0, 40])(
         },
       });
       expect(refused).toHaveProperty("admission", "stale-frame");
-      expect(calls.filter((value) => value === "input.begin")).toHaveLength(2);
+      expect(calls.filter((value) => value === "input.begin")).toHaveLength(1);
       // A later genuine source frame admits input without resetting the video codec.
       now += 100;
       monotonicNow += 100;
@@ -196,7 +197,7 @@ it.each([-1, 0, 40])(
         },
       });
       expect(accepted).toHaveProperty("gestureId");
-      expect(calls.filter((value) => value === "input.begin")).toHaveLength(3);
+      expect(calls.filter((value) => value === "input.begin")).toHaveLength(2);
       expect(calls).not.toContain("video.invalidate");
     } finally {
       release.resolve();

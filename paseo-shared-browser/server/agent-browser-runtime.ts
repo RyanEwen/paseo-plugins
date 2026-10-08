@@ -18,9 +18,9 @@ import {
 import { readJpegFrameDimensions } from "./jpeg-frame";
 import {
   type ProcessIdentity,
+  probeProcess,
   processExists,
   RUNTIME_OWNER_VARIABLE,
-  readProcessIdentity,
 } from "./process-identity";
 
 export { readJpegFrameDimensions as jpegDimensions } from "./jpeg-frame";
@@ -283,7 +283,10 @@ export class AgentBrowserRuntime {
     expiresAt: number;
     timer: ReturnType<typeof setTimeout> | null;
   } | null = null;
-  private stopping = false;
+  private shutdownInFlight: Promise<void> | null = null;
+  private shutDown = false;
+  /** A daemon was launched for this session, so absence of evidence is not proof of exit. */
+  private daemonLaunched = false;
 
   constructor(options: AgentBrowserRuntimeOptions) {
     this.binaryPath = requireAbsolute(options.binaryPath, "agent-browser binary path");
@@ -308,7 +311,7 @@ export class AgentBrowserRuntime {
   async launch(): Promise<void> {
     if (this.connection?.isOpen) return;
     this.invalidateScreencastFrame();
-    this.stopping = false;
+    this.shutDown = false;
     await mkdir(this.profilePath, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     await mkdir(this.ipcDirectory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
     await Promise.all([
@@ -333,6 +336,8 @@ export class AgentBrowserRuntime {
       this.initialUrl,
     ]);
     const targetId = findString(opened, ["targetId", "target_id"]);
+    this.daemonLaunched = true;
+    this.daemon = null;
     await this.protectIpcMetadata();
     await this.captureDaemon();
     await this.connectCdp(targetId);
@@ -1164,32 +1169,46 @@ export class AgentBrowserRuntime {
     ]);
   }
 
+  /**
+   * Concurrent callers share one in-flight shutdown; a failed one is not remembered as
+   * success, so a later call retries and reports the same unconfirmed state.
+   */
   async shutdown(force = false): Promise<void> {
-    if (this.stopping) return;
-    this.stopping = true;
+    if (this.shutDown) return;
+    if (this.shutdownInFlight) return this.shutdownInFlight;
+    const operation = this.performShutdown(force);
+    this.shutdownInFlight = operation;
+    try {
+      await operation;
+      this.shutDown = true;
+    } finally {
+      if (this.shutdownInFlight === operation) this.shutdownInFlight = null;
+    }
+  }
+
+  private async performShutdown(force: boolean): Promise<void> {
     if (this.liveInput) await this.endLiveInput(this.liveInput.id);
     await this.releaseHeldInput();
     this.invalidateScreencastFrame();
-    const owned = this.daemon !== null;
     if (!force) {
       try {
         await this.invoke(["--session", this.session, "--json", "close"]);
       } catch {
-        this.stopping = false;
-        await this.shutdown(true);
+        await this.performShutdown(true);
         return;
       }
       // close returns before the session daemon exits. A same-session relaunch would reach
       // that daemon with its original launch environment (e.g. a stopped private display).
       if (!(await this.daemonExited())) {
-        this.stopping = false;
-        await this.shutdown(true);
+        await this.performShutdown(true);
         return;
       }
     } else {
       await this.terminateDaemon();
     }
-    if (force || owned) await this.removeIpcMetadata();
+    if (force || this.daemonLaunched) await this.removeIpcMetadata();
+    this.daemonLaunched = false;
+    this.daemon = null;
     this.connection?.close();
     this.connection = null;
     this.page = null;
@@ -1203,43 +1222,51 @@ export class AgentBrowserRuntime {
    */
   private async captureDaemon(): Promise<void> {
     const pid = await this.daemonPid();
-    this.daemon =
-      pid === null ? null : { pid, identity: await readProcessIdentity(pid, this.ownerNonce) };
+    if (pid === null) return;
+    const probe = await probeProcess(pid, this.ownerNonce);
+    this.daemon = { pid, identity: probe.status === "owned" ? probe.identity : null };
   }
 
-  private async daemonRunning(): Promise<boolean> {
-    const daemon = this.daemon;
-    if (!daemon) return false;
-    if (!daemon.identity) return processExists(daemon.pid);
-    const current = await readProcessIdentity(daemon.pid, this.ownerNonce);
-    return current?.startTicks === daemon.identity.startTicks;
+  /**
+   * Observes the daemon this runtime launched. Only `gone` is a positive exit; `unknown`
+   * (no PID record, unreadable identity) is never success and never authorises a signal.
+   */
+  private async daemonState(): Promise<"gone" | "owned" | "alive" | "unknown"> {
+    if (!this.daemonLaunched) return "gone";
+    if (!this.daemon) {
+      await this.captureDaemon();
+      if (!this.daemon) return "unknown";
+    }
+    const { pid, identity } = this.daemon;
+    if (!identity) return processExists(pid) ? "alive" : "gone";
+    const probe = await probeProcess(pid, this.ownerNonce);
+    if (probe.status === "absent" || probe.status === "foreign") return "gone";
+    if (probe.status === "owned")
+      return probe.identity.startTicks === identity.startTicks ? "owned" : "gone";
+    return processExists(pid) ? "unknown" : "gone";
   }
 
-  /** True once the recorded daemon is gone (or its verified PID was recycled); bounded observation. */
+  /** True only after positive observation of exit, within the bound. */
   private async daemonExited(): Promise<boolean> {
     for (const deadline = Date.now() + this.daemonExitWaitMs; Date.now() < deadline; ) {
-      if (!(await this.daemonRunning())) return true;
+      if ((await this.daemonState()) === "gone") return true;
       await new Promise((resolve) => setTimeout(resolve, SCREENCAST_SETUP_RETRY_MS));
     }
-    return !(await this.daemonRunning());
+    return (await this.daemonState()) === "gone";
   }
 
-  /** Signals only a still-matching verified daemon, then confirms it exited before returning. */
+  /** Signals only a daemon freshly re-verified as owned, then confirms its exit. */
   private async terminateDaemon(): Promise<void> {
-    const daemon = this.daemon;
-    if (daemon && (await this.daemonRunning())) {
-      if (daemon.identity) {
-        try {
-          process.kill(daemon.pid, "SIGKILL");
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-        }
+    if ((await this.daemonState()) === "owned" && this.daemon) {
+      try {
+        process.kill(this.daemon.pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
-      // An unverified daemon is never signalled; exit must still be observed.
-      if (!(await this.daemonExited()))
-        throw new AgentBrowserUnavailableError("agent-browser daemon exit was not confirmed");
     }
-    this.daemon = null;
+    // Unverified or unknown daemons are never signalled, but exit must still be observed.
+    if (!(await this.daemonExited()))
+      throw new AgentBrowserUnavailableError("agent-browser daemon exit was not confirmed");
   }
 
   private async assertVersion(): Promise<void> {

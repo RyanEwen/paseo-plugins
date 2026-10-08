@@ -214,8 +214,10 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
       let entry = this.workspaces.get(workspaceId);
       if (entry?.lost) {
         // Fail closed: release the dead runtime before any replacement exists.
-        this.workspaces.delete(workspaceId);
+        // Stop first: if the daemon's exit cannot be confirmed the entry stays lost and
+        // no replacement is created behind a possibly live session.
         await this.owner.stop(entry.runtime);
+        this.workspaces.delete(workspaceId);
         entry = undefined;
       }
       if (!entry) {

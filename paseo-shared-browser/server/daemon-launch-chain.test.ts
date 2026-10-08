@@ -52,11 +52,13 @@ it.skipIf(process.platform !== "linux")(
     const native = runtime as unknown as {
       invoke(args: string[]): Promise<unknown>;
       captureDaemon(): Promise<void>;
+      daemonLaunched: boolean;
       daemon: { pid: number; identity: unknown } | null;
     };
     const { mkdir } = await import("node:fs/promises");
     await mkdir(join(directory, "ipc"), { recursive: true });
     await native.invoke(["--session", "chain", "--json", "open", "about:blank"]);
+    native.daemonLaunched = true;
     await native.captureDaemon();
     expect(native.daemon?.identity).toBeTruthy();
     const pid = native.daemon?.pid as number;

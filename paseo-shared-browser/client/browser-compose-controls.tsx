@@ -69,8 +69,14 @@ export function ComposeTextControls({
     session.open();
     setComposeOpen(true);
   };
+  // Callbacks are fenced to the draft that rendered them: a retained Done/Cancel
+  // from a closed draft must not publish, or close, a same-owner replacement.
   const commit = () => {
-    if (session.commit(text.current)) closeCompose();
+    if (generation.current !== draftGeneration) return;
+    if (session.commit(text.current) && generation.current === draftGeneration) closeCompose();
+  };
+  const dismiss = () => {
+    if (generation.current === draftGeneration) closeCompose();
   };
   useEffect(() => {
     if (!request || handledRequest.current === request.id) return;
@@ -83,7 +89,7 @@ export function ComposeTextControls({
       title="Compose text"
       open={composeOpen}
       onOpenChange={(open) => {
-        if (!open) closeCompose();
+        if (!open) dismiss();
       }}
     >
       <Modal.Content>
@@ -113,7 +119,7 @@ export function ComposeTextControls({
             </Text>
           ) : null}
           <View style={styles.mobileRow}>
-            <ControlButton styles={styles} theme={theme} label="Cancel" onPress={closeCompose} />
+            <ControlButton styles={styles} theme={theme} label="Cancel" onPress={dismiss} />
             <ControlButton
               styles={styles}
               theme={theme}

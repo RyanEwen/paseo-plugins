@@ -30,26 +30,24 @@ const target = (frame: BrowserFrame) => ({
 it("releases a cancelled held drag at its last pointer position and drops late channel input", async () => {
   // Same resolution as browser.smoke: explicit overrides, else the prepared runtime in PASEO_HOME.
   const preparedHome = process.env.PASEO_HOME;
-  if (
-    !preparedHome &&
-    !(
-      process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY &&
-      process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE
-    )
-  )
-    throw new Error("Set an isolated, prepared PASEO_HOME (or both executable overrides)");
-  const runtimeRoot = resolveBrowserRuntimeRoot(preparedHome as string);
+  // The prepared runtime is consulted only for an executable without an override.
+  let runtimeRoot: string | null = null;
+  const preparedRuntime = () => {
+    if (!preparedHome) throw new Error("Set an isolated, prepared PASEO_HOME");
+    runtimeRoot ??= resolveBrowserRuntimeRoot(preparedHome);
+    return runtimeRoot;
+  };
   const binaryPath =
     process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY ??
     join(
-      runtimeRoot,
+      preparedRuntime(),
       "node_modules",
       ".bin",
       process.platform === "win32" ? "agent-browser.exe" : "agent-browser",
     );
   const executablePath =
     process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE ??
-    join(runtimeRoot, "chromium", process.platform === "win32" ? "chrome.exe" : "chrome");
+    join(preparedRuntime(), "chromium", process.platform === "win32" ? "chrome.exe" : "chrome");
   await Promise.all([access(binaryPath), access(executablePath)]);
   const previousBinary = process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY;
   const previousExecutable = process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE;

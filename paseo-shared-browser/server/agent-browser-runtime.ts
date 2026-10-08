@@ -255,6 +255,8 @@ export class AgentBrowserRuntime {
   private lastMousePoint = { x: 0, y: 0 };
   private heldKeys = new Map<string, { key: string; code: string }>();
   private heldTouches = false;
+  /** Attachment on which the current held state was published; cleanup never targets another. */
+  private heldOwner: CdpSession | null = null;
   private activeTouches = new Map<number, { x: number; y: number; id: number }>();
   private documentGeneration = 0;
   private liveInput: {
@@ -746,10 +748,19 @@ export class AgentBrowserRuntime {
     method: string,
     params: Record<string, unknown>,
     gestureId?: string,
+    track?: () => void,
   ): Promise<void> {
     try {
       const page = await this.requirePage();
       if (gestureId) await this.assertLiveInput(gestureId);
+      // Authority is validated. Record cleanup intent only now, immediately before
+      // native publication, so rejected unsent packets never alter it while an
+      // uncertain acknowledgement still leaves it in place.
+      if (track) {
+        if (this.heldOwner && this.heldOwner !== page) this.discardHeldState();
+        track();
+        if (this.holdsInput()) this.heldOwner ??= page;
+      }
       const originalInput = gestureId ? this.liveInput : null;
       const modifiers = heldKeyModifiers(this.heldKeys.values());
       const nativeParams =
@@ -778,7 +789,6 @@ export class AgentBrowserRuntime {
 
   async mouseMove(x: number, y: number, gestureId?: string): Promise<void> {
     this.assertPoint(x, y);
-    this.lastMousePoint = { x, y };
     await this.dispatchInput(
       "Input.dispatchMouseEvent",
       {
@@ -790,6 +800,9 @@ export class AgentBrowserRuntime {
         buttons: this.buttonMask(),
       },
       gestureId,
+      () => {
+        this.lastMousePoint = { x, y };
+      },
     );
   }
 
@@ -817,11 +830,6 @@ export class AgentBrowserRuntime {
     gestureId?: string,
   ): Promise<void> {
     this.assertPoint(x, y);
-    // Publication may succeed before an acknowledgement is lost. Track intent
-    // first so cleanup still releases a possibly held button.
-    if (gestureId) await this.assertLiveInput(gestureId);
-    this.heldButtons.add(button);
-    this.lastMousePoint = { x, y };
     await this.dispatchInput(
       "Input.dispatchMouseEvent",
       {
@@ -833,6 +841,12 @@ export class AgentBrowserRuntime {
         clickCount,
       },
       gestureId,
+      () => {
+        // Publication may succeed before an acknowledgement is lost, so a
+        // possibly held button is tracked from the send boundary.
+        this.heldButtons.add(button);
+        this.lastMousePoint = { x, y };
+      },
     );
   }
 
@@ -844,7 +858,6 @@ export class AgentBrowserRuntime {
     gestureId?: string,
   ): Promise<void> {
     this.assertPoint(x, y);
-    this.lastMousePoint = { x, y };
     await this.dispatchInput(
       "Input.dispatchMouseEvent",
       {
@@ -856,6 +869,9 @@ export class AgentBrowserRuntime {
         clickCount,
       },
       gestureId,
+      () => {
+        this.lastMousePoint = { x, y };
+      },
     );
     this.heldButtons.delete(button);
   }
@@ -899,20 +915,29 @@ export class AgentBrowserRuntime {
       );
     }
     if (parsed.type === "up" && !held) throw new Error("Key release has no matching press");
-    if (parsed.type === "down")
-      this.heldKeys.set(parsed.code, { key: parsed.key, code: parsed.code });
-    await this.dispatchInput("Input.dispatchKeyEvent", nativeKeyEvent(parsed), gestureId);
+    await this.dispatchInput(
+      "Input.dispatchKeyEvent",
+      nativeKeyEvent(parsed),
+      gestureId,
+      parsed.type === "down"
+        ? () => this.heldKeys.set(parsed.code, { key: parsed.key, code: parsed.code })
+        : undefined,
+    );
     if (parsed.type === "up") this.heldKeys.delete(parsed.code);
   }
 
   async keyDown(key: string, code = key): Promise<void> {
-    this.heldKeys.set(code, { key, code });
-    await this.dispatchInput("Input.dispatchKeyEvent", {
-      type: "keyDown",
-      key,
-      code,
-      text: key.length === 1 ? key : undefined,
-    });
+    await this.dispatchInput(
+      "Input.dispatchKeyEvent",
+      {
+        type: "keyDown",
+        key,
+        code,
+        text: key.length === 1 ? key : undefined,
+      },
+      undefined,
+      () => this.heldKeys.set(code, { key, code }),
+    );
   }
 
   async keyUp(key: string, code = key): Promise<void> {
@@ -938,18 +963,22 @@ export class AgentBrowserRuntime {
       type === "touchMove"
         ? [...this.activeTouches.values()].filter((point) => !activeIds.has(point.id))
         : [];
-    this.heldTouches = true;
+    const hold = () => {
+      this.heldTouches = true;
+    };
     if (removed.length > 0) {
       await this.dispatchInput(
         "Input.dispatchTouchEvent",
         { type: "touchEnd", touchPoints: removed },
         gestureId,
+        hold,
       );
     }
     await this.dispatchInput(
       "Input.dispatchTouchEvent",
       { type, touchPoints: contacts },
       gestureId,
+      hold,
     );
     // Navigation cleanup already discarded this channel's contacts. Do not
     // recreate held-touch state after its acknowledged start caused navigation.
@@ -1045,14 +1074,30 @@ export class AgentBrowserRuntime {
     }
   }
 
+  private holdsInput(): boolean {
+    return this.heldButtons.size > 0 || this.heldKeys.size > 0 || this.heldTouches;
+  }
+
+  /** Forget held state whose attachment is gone; it is never replayed on a replacement. */
+  private discardHeldState(): void {
+    this.heldButtons.clear();
+    this.heldKeys.clear();
+    this.heldTouches = false;
+    this.activeTouches.clear();
+    this.heldOwner = null;
+  }
+
+  /**
+   * Release only what `page` itself holds. State published on another attachment
+   * is left to that attachment's own cleanup, never retargeted here.
+   */
   async releaseHeldInput(page = this.page): Promise<void> {
     if (!page) {
-      this.heldButtons.clear();
-      this.heldKeys.clear();
-      this.heldTouches = false;
-      this.activeTouches.clear();
+      this.discardHeldState();
       return;
     }
+    if (this.heldOwner && this.heldOwner !== page) return;
+    this.heldOwner = null;
     const buttons = [...this.heldButtons];
     const { x, y } = this.lastMousePoint;
     const keys = [...this.heldKeys.values()];
@@ -1335,7 +1380,7 @@ export class AgentBrowserRuntime {
 
     this.invalidateScreencastFrame();
     // Detaching drops the session that holds any pressed button; release there first.
-    if (this.liveInput?.page === previous) await this.endLiveInput(this.liveInput.id);
+    if (this.liveInput) await this.endLiveInput(this.liveInput.id);
     await this.releaseHeldInput(previous);
     this.page = null;
     this.emulationAppliedPage = null;

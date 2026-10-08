@@ -241,7 +241,10 @@ describe.each(ownershipModes)(
       await writeFile(join(f.ipc, "owned.pid"), String(daemon.pid));
       await f.runtime.shutdown(true);
       await exited(daemon);
-      expect(daemon.signalCode).toBe("SIGKILL");
+      // Portable contract (signalCode is POSIX-only): the runtime asked for SIGKILL of the
+      // owned pid, and that process is observably gone.
+      expect(kill).toHaveBeenCalledWith(daemon.pid, "SIGKILL");
+      expect(daemon.pid && alive(daemon.pid)).toBe(false);
     });
 
     it("does not treat a later unreadable identity as exit and never signals on it", async () => {
@@ -262,7 +265,10 @@ describe.each(ownershipModes)(
       probe.unreadable = false;
       await f.runtime.shutdown(true);
       await exited(daemon);
-      expect(daemon.signalCode).toBe("SIGKILL");
+      // Portable contract (signalCode is POSIX-only): the runtime asked for SIGKILL of the
+      // owned pid, and that process is observably gone.
+      expect(kill).toHaveBeenCalledWith(daemon.pid, "SIGKILL");
+      expect(daemon.pid && alive(daemon.pid)).toBe(false);
     });
 
     it("shares one in-flight shutdown and never reports success after a failed one", async () => {

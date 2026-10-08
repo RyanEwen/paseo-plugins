@@ -1016,4 +1016,60 @@ describe("agent shared-browser authorization", () => {
       "Capture a frame before sending input",
     );
   });
+
+  it("replaces a lapsed agent viewer before creating a tab, creating exactly one page", async () => {
+    let clock = 1_000;
+    const { owner, supervisor, bridge } = createHarness(() => clock);
+    const originalRequest = owner.request.bind(owner);
+    let creates = 0;
+    owner.request = async (runtime, operation, input) => {
+      const data = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+      if (operation === "tabs.create") {
+        creates += 1;
+        return { targetId: "page-two" };
+      }
+      if (operation === "tabs.list") {
+        return [
+          { targetId: "page-one", title: "First", url: "https://first.example/" },
+          ...(creates
+            ? [{ targetId: "page-two", title: "Second", url: "https://second.example/" }]
+            : []),
+        ];
+      }
+      if (operation === "identity") {
+        return { userAgent: "Fake Chromium", targetId: data.targetId ?? "page-one" };
+      }
+      if (data.targetId === "page-two") {
+        if (operation === "state") {
+          return {
+            url: "https://second.example/",
+            title: "Second",
+            canGoBack: false,
+            canGoForward: false,
+            inputGeneration: "0:0",
+          };
+        }
+        if (operation === "emulate") return null;
+      }
+      return originalRequest(runtime, operation, input);
+    };
+    const agentTicket = ticket("lapsed-viewer-tab");
+    await issueTicket(supervisor, bridge, agentTicket);
+    await bindTicket(supervisor, bridge, agentTicket, "agent-one", "workspace-one");
+    await agentRequest(supervisor, agentTicket, "status");
+
+    // Beyond the 45 s viewer lease, within each bridge lease.
+    for (let step = 0; step < 3; step += 1) {
+      clock += 20_000;
+      supervisor.heartbeat(bridge.bridgeId, bridge.epoch);
+    }
+    const result = await agentRequest<{ tabId: string; state: BrowserState }>(
+      supervisor,
+      agentTicket,
+      "tabs.create",
+    );
+    expect(result.tabId).toBe("page-two");
+    expect(result.state.tabId).toBe("page-two");
+    expect(creates).toBe(1);
+  });
 });

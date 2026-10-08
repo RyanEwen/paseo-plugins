@@ -652,8 +652,19 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
       return { state: await this.selectAgentTab(binding, tabId) } as unknown as JsonValue;
     }
     if (operation === "tabs.create") {
-      const viewerToken = await this.ensureAgentViewer(binding);
-      const created = await this.browserPolicy.createTab(viewerToken);
+      const create = async () =>
+        this.browserPolicy.createTab(await this.ensureAgentViewer(binding));
+      let created: { tabId: string };
+      try {
+        created = await create();
+      } catch (error) {
+        // Only a refusal before dispatch is recoverable: the lapsed agent viewer is replaced
+        // once. A lease that ends after the page was created is a distinct, non-retried error.
+        if (!isInvalidViewer(error)) throw error;
+        binding.viewerToken = null;
+        binding.controlToken = null;
+        created = await create();
+      }
       return {
         tabId: created.tabId,
         state: await this.selectAgentTab(binding, created.tabId),

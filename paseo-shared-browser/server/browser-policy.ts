@@ -404,7 +404,16 @@ export class SessionManager {
   /** Expose tab metadata to a client only through its active viewer lease. */
   async listTabsForViewer(viewerToken: string): Promise<{ tabs: BrowserTab[] }> {
     const session = this.requireViewer(viewerToken);
-    return this.listTabs(session.workspaceId);
+    const listed = await this.listTabs(session.workspaceId);
+    // The lease may have lapsed while the runtime answered; never return metadata then.
+    let current = false;
+    try {
+      current = this.requireViewer(viewerToken) === session && !session.archived;
+    } catch {
+      current = false;
+    }
+    if (!current) throw new Error("Browser viewer attachment changed while listing tabs");
+    return listed;
   }
 
   /** A new page shares the workspace profile but does not change any viewer's selection. */
@@ -413,9 +422,15 @@ export class SessionManager {
     const value = asRecord(
       await this.client.requestWorkspace(session.workspaceId, "tabs.create", null),
     );
-    if (this.requireViewer(viewerToken) !== session || session.archived) {
-      throw new Error("Browser viewer attachment changed during tab creation");
+    // The page now exists. A viewer lease that ended meanwhile must not read as a
+    // pre-dispatch refusal, or a caller recovering from an expired viewer would create twice.
+    let current = false;
+    try {
+      current = this.requireViewer(viewerToken) === session && !session.archived;
+    } catch {
+      current = false;
     }
+    if (!current) throw new Error("Browser viewer attachment changed during tab creation");
     const tabId = browserTabSchema.shape.id.parse(value.targetId);
     return { tabId };
   }
@@ -1486,7 +1501,10 @@ export class SessionManager {
       this.closedViewerTabs.delete(token);
     }
     const session = this.viewerSessions.get(token);
-    if (!session || !session.viewers.has(token))
+    const viewer = session?.viewers.get(token);
+    // Expiry is enforced at the authentication boundary itself: an unpruned lapsed lease
+    // never authorizes an entrypoint that does not run pruneExpired first.
+    if (!session || !viewer || viewer.expiresAt <= this.now())
       throw new Error("Viewer token is invalid or expired");
     return session;
   }

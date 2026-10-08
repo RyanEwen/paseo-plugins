@@ -15,6 +15,7 @@ import {
   listPageTargets,
 } from "./cdp";
 import { readJpegFrameDimensions } from "./jpeg-frame";
+import { type ProcessIdentity, readProcessIdentity } from "./process-identity";
 
 export { readJpegFrameDimensions as jpegDimensions } from "./jpeg-frame";
 
@@ -35,6 +36,8 @@ const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SCREENCAST_SETUP_RETRY_MS = 25;
+/** Bound for the agent-browser session daemon to exit after close or SIGKILL. */
+const DAEMON_EXIT_WAIT_MS = 5_000;
 
 export class AgentBrowserUnavailableError extends Error {
   override readonly name = "AgentBrowserUnavailableError";
@@ -117,6 +120,8 @@ export interface AgentBrowserRuntimeOptions {
   /** Trusted private DISPLAY and XAUTHORITY overrides; never mutates host environment. */
   launchEnvironment?: Readonly<Record<string, string>>;
   timeoutMs?: number;
+  /** Bound for the session daemon to exit after close or SIGKILL. */
+  daemonExitWaitMs?: number;
 }
 
 interface VersionResult {
@@ -238,7 +243,8 @@ export class AgentBrowserRuntime {
   private readonly headed: boolean;
   private readonly timeoutMs: number;
   private readonly environment: NodeJS.ProcessEnv;
-  private readonly privateDisplay: boolean;
+  private daemon: ProcessIdentity | null = null;
+  private readonly daemonExitWaitMs: number;
   private connection: CdpConnection | null = null;
   private page: CdpSession | null = null;
   private targetId: string | null = null;
@@ -281,8 +287,8 @@ export class AgentBrowserRuntime {
     this.session = options.session;
     this.headed = options.headed ?? false;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.daemonExitWaitMs = options.daemonExitWaitMs ?? DAEMON_EXIT_WAIT_MS;
     this.environment = runtimeEnvironment(this.ipcDirectory, options.launchEnvironment);
-    this.privateDisplay = options.launchEnvironment !== undefined;
     this.initialUrl = options.initialUrl ?? "about:blank";
   }
 
@@ -315,6 +321,7 @@ export class AgentBrowserRuntime {
     ]);
     const targetId = findString(opened, ["targetId", "target_id"]);
     await this.protectIpcMetadata();
+    await this.captureDaemon();
     await this.connectCdp(targetId);
   }
 
@@ -1150,6 +1157,7 @@ export class AgentBrowserRuntime {
     if (this.liveInput) await this.endLiveInput(this.liveInput.id);
     await this.releaseHeldInput();
     this.invalidateScreencastFrame();
+    const owned = this.daemon !== null;
     if (!force) {
       try {
         await this.invoke(["--session", this.session, "--json", "close"]);
@@ -1158,12 +1166,17 @@ export class AgentBrowserRuntime {
         await this.shutdown(true);
         return;
       }
-      // The daemon keeps the launch environment it started with. A private display ends
-      // with its runtime, so a surviving daemon would relaunch Chromium on a dead display.
-      if (this.privateDisplay) await this.discardDaemon();
+      // close returns before the session daemon exits. A same-session relaunch would reach
+      // that daemon with its original launch environment (e.g. a stopped private display).
+      if (!(await this.daemonExited())) {
+        this.stopping = false;
+        await this.shutdown(true);
+        return;
+      }
     } else {
-      await this.discardDaemon();
+      await this.terminateDaemon();
     }
+    if (force || owned) await this.removeIpcMetadata();
     this.connection?.close();
     this.connection = null;
     this.page = null;
@@ -1171,16 +1184,41 @@ export class AgentBrowserRuntime {
     this.invalidateScreencastFrame();
   }
 
-  private async discardDaemon(): Promise<void> {
+  /** Records this runtime's own daemon so later signals never trust the PID file alone. */
+  private async captureDaemon(): Promise<void> {
     const pid = await this.daemonPid();
-    if (pid !== null) {
+    this.daemon = pid === null ? null : await readProcessIdentity(pid, this.binaryPath);
+  }
+
+  private async daemonRunning(): Promise<boolean> {
+    const daemon = this.daemon;
+    if (!daemon) return false;
+    const current = await readProcessIdentity(daemon.pid, this.binaryPath);
+    return current?.startTicks === daemon.startTicks;
+  }
+
+  /** True once the captured daemon is gone (or its PID was recycled); bounded observation. */
+  private async daemonExited(): Promise<boolean> {
+    for (const deadline = Date.now() + this.daemonExitWaitMs; Date.now() < deadline; ) {
+      if (!(await this.daemonRunning())) return true;
+      await new Promise((resolve) => setTimeout(resolve, SCREENCAST_SETUP_RETRY_MS));
+    }
+    return !(await this.daemonRunning());
+  }
+
+  /** Signals only a still-matching owned daemon, then confirms it exited before returning. */
+  private async terminateDaemon(): Promise<void> {
+    const daemon = this.daemon;
+    if (daemon && (await this.daemonRunning())) {
       try {
-        process.kill(pid, "SIGKILL");
+        process.kill(daemon.pid, "SIGKILL");
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
+      if (!(await this.daemonExited()))
+        throw new AgentBrowserUnavailableError("agent-browser daemon did not exit");
     }
-    await this.removeIpcMetadata();
+    this.daemon = null;
   }
 
   private async assertVersion(): Promise<void> {

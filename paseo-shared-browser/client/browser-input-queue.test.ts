@@ -23,6 +23,10 @@ const authority: BrowserGestureAuthority = {
     viewportGeneration: 1,
   },
 };
+const freshAuthority: BrowserGestureAuthority = {
+  ...authority,
+  target: { ...authority.target, frameId: "fresh-front" },
+};
 const state = { captureScale: 1 } as BrowserState;
 const point = (x: number) => ({ x, y: 1, width: 800, height: 600 });
 const move = (x: number): BrowserGestureEvent => ({
@@ -345,7 +349,7 @@ describe("bounded browser input queue", () => {
       "up",
     ]);
     expect(f.sent.map((input) => input.sequence)).toEqual([1, 2, 3, 4, 5]);
-    expect(f.sent[2]?.target).toBeUndefined();
+    expect(f.sent[2]?.target).toEqual(authority.target);
     expect(f.sent[0]?.target).toBeUndefined();
     expect(f.sent[3]?.event).toMatchObject({ deltaX: 5, deltaY: 12 });
     expect(f.ended[0]).toMatchObject({ sequence: 6, cancel: false });
@@ -384,7 +388,7 @@ describe("bounded browser input queue", () => {
       ["move", [1]],
       ["end", []],
     ]);
-    expect(f.sent[0]?.target).toBeUndefined();
+    expect(f.sent[0]?.target).toEqual(authority.target);
     expect(f.sent[1]?.target).toBeUndefined();
     expect(f.errors).toEqual([]);
   });
@@ -486,30 +490,39 @@ describe("bounded browser input queue", () => {
     expect(f.errors).toEqual([]);
   });
 
-  it("continues independent presses and wheel without new pixels on admitted control", async () => {
+  it("waits for actual decoded pixels between independent presses, never for a held second finger", async () => {
+    const frame = deferred<void>();
     const waited: string[] = [];
     const f = fixture(async (id) => {
       waited.push(id);
-    }, true);
+      await frame.promise;
+    });
     f.beginGate.resolve({ state, gestureId: "owned", nextSequence: 1 });
     f.queue.enqueue({ kind: "scroll", point: point(1), deltaX: 0, deltaY: 20 });
     await flush();
-    f.changeAuthority(null);
-    for (let i = 0; i < 5; i++) {
-      expect(
-        f.queue.enqueue({ kind: "down", point: point(i), button: "left", clickCount: 1 }),
-      ).toBe(true);
-      expect(f.queue.enqueue({ kind: "up", point: point(i), button: "left", clickCount: 1 })).toBe(
-        true,
-      );
-      await flush();
-    }
-    expect(f.sent.map((input) => input.event.kind)).toEqual([
-      "scroll",
-      ...Array(5).fill(["down", "up"]).flat(),
-    ]);
-    expect(f.sent.every((input) => input.target === undefined)).toBe(true);
-    expect(waited).toEqual([]);
+    f.queue.enqueue({
+      kind: "down",
+      point: point(1),
+      button: "left",
+      clickCount: 1,
+    });
+    f.queue.enqueue({
+      kind: "up",
+      point: point(1),
+      button: "left",
+      clickCount: 1,
+    });
+    await flush();
+    expect(f.sent.map((input) => input.event.kind)).toEqual(["scroll"]);
+    expect(waited).toEqual(["decoded-front"]);
+    f.changeAuthority({
+      ...authority,
+      target: { ...authority.target, frameId: "new-front" },
+    });
+    frame.resolve();
+    await flush();
+    expect(f.sent[1]?.target?.frameId).toBe("new-front");
+    expect(f.sent.map((input) => input.event.kind)).toEqual(["scroll", "down", "up"]);
     expect(f.errors).toEqual([]);
   });
 
@@ -647,8 +660,10 @@ describe("bounded browser input queue", () => {
     }
   });
 
-  it("does not reopen admitted geometry under replacement control", async () => {
-    const f = fixture(undefined, true);
+  it("does not begin under replacement control after the initial invalidated-frame wait", async () => {
+    const f = fixture(async () => {
+      f.changeAuthority({ ...authority, controlToken: "replacement" });
+    });
     let begins = 0;
     f.transport.begin = async () => {
       begins += 1;
@@ -658,9 +673,7 @@ describe("bounded browser input queue", () => {
     await flush();
     f.queue.finish();
     await flush();
-    f.changeAuthority(null);
-    f.changeControl({ ...authority, controlToken: "replacement" });
-    expect(f.queue.enqueue(move(1))).toBe(false);
+    f.queue.enqueue(move(1));
     await flush();
     expect(begins).toBe(1);
     expect(f.sent).toHaveLength(1);
@@ -736,7 +749,7 @@ it("never merges normal scrolling with a differently modified wheel gesture", as
   await flush();
 });
 
-it("keeps admitted held drag/release/end when video input receipts are revoked", async () => {
+it("keeps a held drag/release/end when pixels are revoked, but a new press then needs decoded pixels", async () => {
   const f = fixture(undefined, true);
   f.queue.enqueue({ kind: "down", button: "left", point: point(1), clickCount: 1 });
   f.beginGate.resolve({ state, gestureId: "opaque", nextSequence: 1 });
@@ -752,15 +765,14 @@ it("keeps admitted held drag/release/end when video input receipts are revoked",
   expect(f.sent.slice(1).every((value) => value.target === undefined)).toBe(true);
   expect(f.ended).toEqual([expect.objectContaining({ gestureId: "opaque", cancel: false })]);
   expect(f.errors).toEqual([]);
+  // No retained admission survives the closed channel.
   expect(f.queue.enqueue({ kind: "down", button: "left", point: point(50), clickCount: 1 })).toBe(
-    true,
+    false,
   );
-  await flush();
-  expect(f.sent.at(-1)?.event.kind).toBe("down");
-  f.queue.cancel();
+  expect(f.sent).toHaveLength(3);
 });
 
-it("keeps admitted keyup and a new physical press without fresh pixels", async () => {
+it("keeps an admitted keyup, but a new press after revoked pixels is refused before publication", async () => {
   const f = fixture(undefined, true);
   f.queue.enqueue({
     kind: "key",
@@ -786,10 +798,9 @@ it("keeps admitted keyup and a new physical press without fresh pixels", async (
   await flush();
   f.queue.enqueue({ kind: "down", button: "left", point: point(2), clickCount: 1 });
   await flush();
-  expect(f.sent.map((value) => value.event.kind)).toEqual(["key", "key", "down"]);
-  expect(f.errors).toEqual([]);
-  expect(f.sent.every((value) => value.target === undefined)).toBe(true);
-  f.queue.cancel();
+  expect(f.sent.map((value) => value.event.kind)).toEqual(["key", "key"]);
+  expect(f.errors).toHaveLength(1);
+  expect(f.ended).toEqual([expect.objectContaining({ cancel: true })]);
 });
 
 it("control incarnation replacement still cancels an admitted continuation before publication", async () => {
@@ -852,21 +863,22 @@ function idleFixture() {
   };
 }
 
-it("reopens an empty channel before sending input after suspended idle cleanup", async () => {
+it("reopens an expired channel only from a newer decoded frame, never from the old admission", async () => {
   const f = idleFixture();
   try {
     f.queue.enqueue({ kind: "down", button: "left", point: point(1), clickCount: 1 });
     f.queue.enqueue({ kind: "up", button: "left", point: point(1), clickCount: 1 });
     await flush();
-    f.changeAuthority(null);
+    f.changeAuthority(freshAuthority);
     // Simulate a paused client: no timer or finish callback ran before native expiry.
     f.advanceClock(6_000);
     f.queue.enqueue({ kind: "down", button: "left", point: point(2), clickCount: 1 });
     await flush();
     expect(f.errors).toEqual([]);
     expect(f.beginnings).toHaveLength(2);
-    expect(f.beginnings[1]?.target).toEqual(authority.target);
+    expect(f.beginnings[1]?.target).toEqual(freshAuthority.target);
     expect(f.sent.map((input) => input.gestureId)).toEqual(["opaque-1", "opaque-1", "opaque-2"]);
+    expect(f.sent.at(-1)?.target).toEqual(freshAuthority.target);
   } finally {
     await f.cleanup();
   }
@@ -883,7 +895,7 @@ it("retires a late idle finish without addressing the expired channel", async ()
     expect(f.errors).toEqual([]);
     expect(f.ended).toEqual([]);
     expect(f.finishes()).toBe(1);
-    f.changeAuthority(null);
+    f.changeAuthority(freshAuthority);
     expect(f.queue.enqueue(move(2))).toBe(true);
     await flush();
     expect(f.beginnings).toHaveLength(2);
@@ -928,8 +940,13 @@ it("discards suspended idle admission when native control identity changes", asy
   }
 });
 
-it("reopens only ACKed same-context geometry after idle closure with no new frame", async () => {
-  const f = fixture(undefined, true);
+it("never reopens on a spent receipt: the next press waits for a newer decoded frame", async () => {
+  let waited = 0;
+  const f: ReturnType<typeof fixture> = fixture(async (afterFrameId) => {
+    waited += 1;
+    expect(afterFrameId).toBe(authority.target.frameId);
+    f.changeAuthority(freshAuthority);
+  }, true);
   const beginnings: BrowserGestureAuthority[] = [];
   f.transport.begin = async (input) => {
     beginnings.push(input);
@@ -938,19 +955,21 @@ it("reopens only ACKed same-context geometry after idle closure with no new fram
   f.queue.enqueue({ kind: "down", button: "left", point: point(1), clickCount: 1 });
   f.queue.enqueue({ kind: "up", button: "left", point: point(1), clickCount: 1 });
   await flush();
-  f.changeAuthority(null);
   f.queue.finish();
   await flush();
   expect(f.queue.enqueue({ kind: "down", button: "left", point: point(2), clickCount: 1 })).toBe(
     true,
   );
   await flush();
+  expect(waited).toBe(1);
   expect(beginnings).toHaveLength(2);
-  expect(beginnings[1]?.target).toEqual(authority.target);
+  expect(beginnings[1]?.target).toEqual(freshAuthority.target);
   expect(f.sent.at(-1)?.gestureId).toBe("opaque-2");
+  expect(f.sent.at(-1)?.target).toEqual(freshAuthority.target);
   expect(f.errors).toEqual([]);
   f.queue.cancel();
   await flush();
+  f.changeControl(null);
   expect(f.queue.enqueue(move(3))).toBe(false);
 });
 
@@ -1012,8 +1031,10 @@ it.each(["viewer", "controller", "session", "runtime", "bridge", "document", "vi
   },
 );
 
-it("reuses acknowledged empty geometry for separate touch contacts and committed text", async () => {
-  const f = fixture(undefined, true);
+it("gives each independent touch contact its own decoded receipt; fingers within a gesture and text reuse the channel", async () => {
+  const f: ReturnType<typeof fixture> = fixture(async () => {
+    f.changeAuthority(freshAuthority);
+  }, true);
   const touch = (type: "start" | "move" | "end", ids: number[]): BrowserGestureEvent => ({
     kind: "touch",
     type,
@@ -1022,7 +1043,6 @@ it("reuses acknowledged empty geometry for separate touch contacts and committed
   f.queue.enqueue(touch("start", [0]));
   f.beginGate.resolve({ state, gestureId: "opaque", nextSequence: 1 });
   await flush();
-  f.changeAuthority(null);
   f.queue.enqueue(touch("start", [0, 1]));
   f.queue.enqueue(touch("move", [1]));
   f.queue.enqueue(touch("end", []));
@@ -1040,7 +1060,15 @@ it("reuses acknowledged empty geometry for separate touch contacts and committed
     "text",
   ]);
   expect(f.sent.map((input) => input.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7]);
-  expect(f.sent.every((input) => !input.target)).toBe(true);
+  expect(f.sent.map((input) => input.target?.frameId)).toEqual([
+    authority.target.frameId,
+    undefined,
+    undefined,
+    undefined,
+    freshAuthority.target.frameId,
+    undefined,
+    undefined,
+  ]);
   expect(f.errors).toEqual([]);
   f.queue.cancel();
 });

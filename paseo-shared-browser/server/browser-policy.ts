@@ -106,11 +106,6 @@ interface Controller {
   controlToken: string;
   expiresAt: number;
 }
-/** One decoded geometry basis for the current human controller, separate from agent receipts. */
-type HumanInputAdmission = Pick<
-  BrowserGesture,
-  "viewerToken" | "controlToken" | "expected" | "runtimeInputGeneration"
-> & { frameId: string };
 interface BrowserSession {
   workspaceId: string;
   sessionId: string;
@@ -152,7 +147,6 @@ interface BrowserSession {
   error: string | null;
   archived: boolean;
   gesture: BrowserGesture | null;
-  humanInputAdmission: HumanInputAdmission | null;
   inputGeneration: string | null;
   frameRevision: number;
   /** Playback and input fences use the native capture's Node elapsed clock. */
@@ -249,7 +243,6 @@ export class SessionManager {
     this.bridgeEpoch = epoch;
     for (const session of this.sessions.values()) {
       if (session.bridgeEpoch !== epoch) {
-        session.humanInputAdmission = null;
         void this.cancelGesture(session);
         // A new bridge cannot admit a token issued by the previous attachment.
         this.invalidateFrames(session);
@@ -296,7 +289,6 @@ export class SessionManager {
       const detached = session.viewers.delete(viewerToken);
       this.viewerSessions.delete(viewerToken);
       if (session.controller?.viewerToken === viewerToken) {
-        session.humanInputAdmission = null;
         await this.cancelGesture(session);
         session.controller = null;
       }
@@ -374,7 +366,6 @@ export class SessionManager {
       if (!canUseCaptureDensity(session.viewport, input.density))
         throw new RangeError("Capture density exceeds the supported image bounds");
       if (session.captureScale !== input.density) {
-        session.humanInputAdmission = null;
         await this.cancelGesture(session);
         const preset = DEVICE_PRESETS.find(({ id }) => id === session.devicePresetId);
         await this.request(session, "capture.density", {
@@ -544,7 +535,6 @@ export class SessionManager {
       if (current && current.viewerToken !== viewerToken && !takeover)
         throw new Error("Browser control is held by another viewer");
       if (current?.viewerToken !== viewerToken) {
-        session.humanInputAdmission = null;
         await this.cancelGesture(session);
       }
       const controller =
@@ -567,7 +557,6 @@ export class SessionManager {
     const session = this.requireViewer(viewerToken);
     return this.serialize(session, async () => {
       this.requireController(session, viewerToken, controlToken);
-      session.humanInputAdmission = null;
       await this.cancelGesture(session);
       session.controller = null;
       this.heartbeatViewer(session, viewerToken);
@@ -579,7 +568,6 @@ export class SessionManager {
     const session = this.requireViewer(input.viewerToken);
     return this.serialize(session, async () => {
       this.requireMutationAccess(session, input);
-      session.humanInputAdmission = null;
       await this.cancelGesture(session);
       const navigationGeneration = session.navigationGeneration;
       if (input.action.kind === "goto")
@@ -614,7 +602,6 @@ export class SessionManager {
         session.viewport.height !== input.viewport.height ||
         session.devicePresetId !== null
       ) {
-        session.humanInputAdmission = null;
         await this.request(session, "emulate", {
           ...input.viewport,
           deviceScaleFactor: 1,
@@ -642,7 +629,6 @@ export class SessionManager {
       await this.cancelGesture(session);
       const preset = DEVICE_PRESETS.find(({ id }) => id === input.presetId);
       if (!preset) throw new Error("Unknown device preset");
-      session.humanInputAdmission = null;
       // Resolve the display under the session lock. A mode toggle must neither
       // replay remembered dimensions nor change the capture's pixel resolution.
       const viewport = input.preserveDisplay ? session.viewport : preset.viewport;
@@ -691,21 +677,19 @@ export class SessionManager {
   }
 
   /**
-   * Admit decoded geometry once, then reopen its same human control context
-   * after idle cleanup without requiring new pixels. Native begin/check must
-   * still pin the original attachment/document; this never admits agent input.
+   * Admit one human channel from a decoded frame receipt that is still fresh.
+   * A receipt is bounded by its TTL and cleared by acknowledged input; an idle
+   * reopen therefore needs new pixels, never a retained earlier admission. Native
+   * begin pins the attachment/document. This never admits agent input.
    */
   async beginGesture(input: BeginGestureInput) {
     const session = this.requireViewer(input.viewerToken);
     return this.serialize(session, async () => {
       this.requireMutationAccess(session, input);
-      const retainedAdmission = this.matchesHumanInputAdmission(session, input);
-      if (!retainedAdmission) {
-        await this.refreshPageMetadata(session);
-        session.error = null;
-        this.requireMutationAccess(session, input);
-      }
-      if (!retainedAdmission && !this.isRecentFrame(session, input.target)) {
+      await this.refreshPageMetadata(session);
+      session.error = null;
+      this.requireMutationAccess(session, input);
+      if (!this.isRecentFrame(session, input.target)) {
         // A pre-input capture can decode after scroll revoked its token. Report
         // known non-publication, not an uncertain runtime failure. The client
         // may obtain another decoded frame before admitting its still-unsent input.
@@ -737,24 +721,10 @@ export class SessionManager {
         await this.assertGestureCurrent(session, gesture);
         this.renewController(session, input.viewerToken);
         this.scheduleGestureTimeout(session, gesture);
-        // Initial admission reconciles metadata. Retained geometry instead uses
-        // atomic native begin(expectedInputGeneration) plus checks, so idle reopen
-        // cannot adopt a replacement document or block on page metadata catchup.
         const state = this.projectState(session, input.viewerToken);
         await this.assertGestureCurrent(session, gesture);
-        // Unknown legacy native identity cannot establish a reusable basis.
-        if (gesture.runtimeInputGeneration !== null) {
-          session.humanInputAdmission = {
-            frameId: input.target.frameId,
-            viewerToken: gesture.viewerToken,
-            controlToken: gesture.controlToken,
-            expected: { ...gesture.expected },
-            runtimeInputGeneration: gesture.runtimeInputGeneration,
-          };
-        }
         return { state, gestureId: gesture.id, nextSequence: gesture.nextSequence };
       } catch (error) {
-        session.humanInputAdmission = null;
         await this.cancelGesture(session, gesture);
         throw error;
       }
@@ -763,8 +733,10 @@ export class SessionManager {
 
   /**
    * Continue an admitted human channel independently of decoded-frame catchup.
-   * Exact control/document/geometry/native checks still fence every ordered
-   * packet. An uncertain publication revokes observations and is never replayed.
+   * Exact control/document/geometry/native checks fence every ordered packet, and
+   * every new press (mouse down or first touch contact) needs its own fresh decoded
+   * receipt. Held motion and releases reuse the channel. Uncertain publication
+   * revokes observations and is never replayed.
    */
   async updateGesture(input: UpdateGestureInput): Promise<UpdateGestureReply> {
     const session = this.requireViewer(input.viewerToken);
@@ -779,8 +751,14 @@ export class SessionManager {
         await this.assertGestureCurrent(session, gesture);
         gesture.validate(event);
         const hover = gesture.isHover(event);
-        // Admission belongs to this exact human channel, not each painted
-        // receipt. Revoke agent observations before an outcome can become unknown.
+        if (
+          event.kind === "down" ||
+          (event.kind === "touch" && event.type === "start" && gesture.touches.size === 0)
+        ) {
+          if (!input.target) throw new Error("A current frame is required for a new press");
+          this.requireRecentFrame(session, input.target);
+        }
+        // Revoke agent observations before an outcome can become unknown.
         this.invalidateGestureObservations(session, hover);
         if (event.kind === "key") {
           await this.request(session, "input.key", {
@@ -842,7 +820,6 @@ export class SessionManager {
         await this.assertGestureCurrent(session, gesture);
         return { state, gestureId: gesture.id, nextSequence: gesture.nextSequence, cursor };
       } catch (error) {
-        session.humanInputAdmission = null;
         if (publishedEvent) {
           const completion = await this.completeNavigatingInput(
             session,
@@ -917,49 +894,20 @@ export class SessionManager {
       const gesture = session.gesture;
       if (!gesture && input.cancel) {
         this.requireController(session, input.viewerToken, input.controlToken);
-        session.humanInputAdmission = null;
         return { state: this.projectState(session, input.viewerToken), cursor: null };
       }
       const owned = this.requireGesture(session, input);
-      if (input.cancel) session.humanInputAdmission = null;
       try {
         if (!input.cancel) {
           this.assertGesturePacketContext(owned, input.expected);
           owned.assertSequence(input.sequence, this.now());
           await this.assertGestureCurrent(session, owned);
         }
-      } catch (error) {
-        session.humanInputAdmission = null;
-        throw error;
       } finally {
         await this.cancelGesture(session, owned);
       }
       return { state: this.projectState(session, input.viewerToken), cursor: null };
     });
-  }
-
-  /** A caller can only select its original admitted receipt under the exact current native context. */
-  private matchesHumanInputAdmission(session: BrowserSession, input: BeginGestureInput): boolean {
-    const admission = session.humanInputAdmission;
-    if (!admission) return false;
-    const contextMatches =
-      admission.viewerToken === input.viewerToken &&
-      admission.controlToken === input.controlToken &&
-      admission.runtimeInputGeneration !== null &&
-      admission.runtimeInputGeneration === session.inputGeneration &&
-      input.target.navigationGeneration === admission.expected.navigationGeneration &&
-      input.target.viewportGeneration === admission.expected.viewportGeneration &&
-      (
-        [
-          "sessionId",
-          "runtimeId",
-          "bridgeEpoch",
-          "navigationGeneration",
-          "viewportGeneration",
-        ] as const
-      ).every((key) => admission.expected[key] === input.expected[key]);
-    if (!contextMatches) session.humanInputAdmission = null;
-    return contextMatches && admission.frameId === input.target.frameId;
   }
 
   private requireGesture(
@@ -1168,7 +1116,6 @@ export class SessionManager {
         error: null,
         archived: false,
         gesture: null,
-        humanInputAdmission: null,
         inputGeneration: typeof state.inputGeneration === "string" ? state.inputGeneration : null,
       };
     } catch (error) {
@@ -1233,7 +1180,6 @@ export class SessionManager {
     const now = this.now();
     for (const [token, viewer] of session.viewers)
       if (viewer.expiresAt <= now) {
-        if (session.humanInputAdmission?.viewerToken === token) session.humanInputAdmission = null;
         session.viewers.delete(token);
         this.viewerSessions.delete(token);
       }
@@ -1241,7 +1187,6 @@ export class SessionManager {
       session.controller &&
       (session.controller.expiresAt <= now || !session.viewers.has(session.controller.viewerToken))
     ) {
-      session.humanInputAdmission = null;
       session.controller = null;
       void this.serialize(session, () => this.cancelGesture(session)).catch(() => undefined);
     }
@@ -1328,7 +1273,6 @@ export class SessionManager {
           (session) =>
             session.sessionId === token ||
             session.controller?.controlToken === token ||
-            session.humanInputAdmission?.frameId === token ||
             session.recentFrames.has(token),
         )
       )
@@ -1612,7 +1556,6 @@ export class SessionManager {
     const documentChanged =
       session.inputGeneration !== null && inputGeneration !== session.inputGeneration;
     if ((session.lastUrl && session.lastUrl !== url) || documentChanged) {
-      session.humanInputAdmission = null;
       await this.cancelGesture(session);
       session.navigationGeneration += 1;
       this.invalidateFrames(session);

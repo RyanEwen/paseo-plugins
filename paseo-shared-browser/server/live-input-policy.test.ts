@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type BrowserGestureEvent, MAX_HELD_BROWSER_KEYS } from "../shared/browser";
+import {
+  type BrowserGestureEvent,
+  type BrowserInputEvent,
+  MAX_HELD_BROWSER_KEYS,
+} from "../shared/browser";
 import { JPEG_QUALITY } from "../shared/capture-settings";
 import { type BrowserRuntimeClient, SessionManager } from "./browser-policy";
 
@@ -567,6 +571,86 @@ describe("owned ordered live input", () => {
       expect(state.calls.some((call) => call.operation === "mouse.down")).toBe(false);
       const beginCall = state.calls.find((call) => call.operation === "input.begin");
       expect(beginCall?.input).toMatchObject({ expectedInputGeneration: "0:0" });
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
+  it("discrete input refuses a document that navigated after capture before any native primitive", async () => {
+    const events: BrowserInputEvent[] = [
+      { kind: "type", text: "secret" },
+      { kind: "key", key: "Enter" },
+      { kind: "move", point: point() },
+      { kind: "scroll", point: point(), deltaX: 0, deltaY: 40 },
+      { kind: "click", point: point(), button: "left", clickCount: 1 },
+    ];
+    for (const event of events) {
+      const state = await fixture();
+      try {
+        state.changeUrl("https://fixture.invalid/autonomous-navigation");
+        state.reloadSameUrl();
+        const before = state.calls.length;
+        await expect(
+          state.manager.sendInput({ ...state.context, target: state.target, event }),
+        ).rejects.toThrow("stale");
+        expect(
+          state.calls
+            .slice(before)
+            .filter((call) => /^(text|key|mouse|input\.begin)/.test(call.operation)),
+        ).toEqual([]);
+      } finally {
+        await state.manager.disconnect();
+      }
+    }
+  });
+
+  it("pins the reconciled document at native begin, so a replacement racing the check publishes nothing", async () => {
+    const state = await fixture();
+    try {
+      state.intercept(async (operation) => {
+        if (operation === "input.begin") state.reloadSameUrl();
+      });
+      const before = state.calls.length;
+      await expect(
+        state.manager.sendInput({
+          ...state.context,
+          target: state.target,
+          event: { kind: "type", text: "secret" },
+        }),
+      ).rejects.toThrow("attachment changed before binding");
+      const calls = state.calls.slice(before);
+      expect(calls.find((call) => call.operation === "input.begin")?.input).toMatchObject({
+        expectedInputGeneration: "0:0",
+      });
+      expect(calls.some((call) => call.operation === "text.insert")).toBe(false);
+      expect(calls.some((call) => call.operation === "input.end")).toBe(true);
+    } finally {
+      await state.manager.disconnect();
+    }
+  });
+
+  it("spends the capture when admitted discrete input fails partway, so it cannot be reused", async () => {
+    const state = await fixture();
+    try {
+      state.intercept(async (operation) => {
+        if (operation === "mouse.up") throw new Error("Runtime failure after press");
+      });
+      await expect(
+        state.manager.sendInput({
+          ...state.context,
+          target: state.target,
+          event: { kind: "click", point: point(), button: "left", clickCount: 1 },
+        }),
+      ).rejects.toThrow("Runtime failure");
+      state.intercept(async () => {});
+      await expect(
+        state.manager.sendInput({
+          ...state.context,
+          target: state.target,
+          event: { kind: "type", text: "again" },
+        }),
+      ).rejects.toThrow("frame is stale");
+      expect(state.calls.filter((call) => call.operation === "text.insert")).toEqual([]);
     } finally {
       await state.manager.disconnect();
     }

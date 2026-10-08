@@ -661,8 +661,8 @@ export class SessionManager {
     return this.serialize(session, async () => {
       this.requireMutationAccess(session, input);
       this.requireRecentFrame(session, input.target);
-      await this.cancelGesture(session);
       try {
+        await this.cancelGesture(session);
         await this.dispatchDiscreteInput(session, input.event, input.target);
       } finally {
         const hadVideo = session.videoReceipts.size > 0 || session.videoReads.size > 0;
@@ -1428,18 +1428,23 @@ export class SessionManager {
     }
   }
 
-  /** A strict discrete press owns one private native cleanup channel. The ID is
-   * never returned to callers and grants no agent continuation. Native end uses
-   * the original page even after navigation, revocation or a lost down ACK. */
+  /**
+   * Every discrete primitive runs inside one private runtime-owned channel. The
+   * captured document is reconciled before anything is published, native begin
+   * pins that exact attachment and document (expectedInputGeneration), and the
+   * runtime re-checks the pin before each primitive, so autonomous navigation
+   * after capture cannot reach an unobserved page. The ID is never returned and
+   * grants no agent continuation. Native end releases anything still held on the
+   * original attachment, even after navigation, revocation or a lost ACK.
+   * Nothing is retried.
+   */
   private async dispatchDiscreteInput(
     session: BrowserSession,
     event: BrowserInputEvent,
     target: InputTarget,
   ): Promise<void> {
-    if (event.kind !== "key" && event.kind !== "click" && event.kind !== "drag") {
-      await this.dispatchInput(session, event, target);
-      return;
-    }
+    await this.refreshPageMetadata(session);
+    this.requireRecentFrame(session, target);
     if (session.inputGeneration === null) {
       throw new Error("Browser input identity is unavailable");
     }
@@ -1460,39 +1465,33 @@ export class SessionManager {
     session: BrowserSession,
     event: BrowserInputEvent,
     target: InputTarget,
-    gestureId?: string,
+    gestureId: string,
   ): Promise<void> {
+    const send = (operation: string, input: Record<string, JsonValue>) =>
+      this.request(session, operation, { ...input, gestureId });
     const assertTargetCurrent = async () => {
       await this.refreshPageMetadata(session);
       this.requireRecentFrame(session, target);
     };
     if (event.kind === "type") {
-      await this.request(session, "text.insert", { text: event.text });
+      await send("text.insert", { text: event.text });
       return;
     }
     if (event.kind === "key") {
-      await this.request(session, "key.down", {
-        key: event.key,
-        ...(gestureId ? { gestureId } : {}),
-      });
-      await runWithInputCleanup(assertTargetCurrent, () =>
-        this.request(session, "key.up", {
-          key: event.key,
-          ...(gestureId ? { gestureId } : {}),
-        }),
-      );
+      await send("key.down", { key: event.key });
+      await runWithInputCleanup(assertTargetCurrent, () => send("key.up", { key: event.key }));
       return;
     }
     if (event.kind === "move") {
       const point = mapDisplayedPoint(event.point, session.viewport);
-      await this.request(session, "mouse.move", { x: point.x, y: point.y });
+      await send("mouse.move", { x: point.x, y: point.y });
       return;
     }
     if (event.kind === "scroll") {
       const point = mapDisplayedPoint(event.point, session.viewport);
-      await this.request(session, "mouse.move", { x: point.x, y: point.y });
+      await send("mouse.move", { x: point.x, y: point.y });
       await assertTargetCurrent();
-      await this.request(session, "mouse.wheel", {
+      await send("mouse.wheel", {
         x: point.x,
         y: point.y,
         deltaX: event.deltaX,
@@ -1504,43 +1503,33 @@ export class SessionManager {
       event.kind === "drag" ? event.start : event.point,
       session.viewport,
     );
-    await this.request(session, "mouse.move", {
-      x: start.x,
-      y: start.y,
-      ...(gestureId ? { gestureId } : {}),
-    });
+    await send("mouse.move", { x: start.x, y: start.y });
     await assertTargetCurrent();
     const count = event.kind === "click" ? event.clickCount : 1;
     for (let clickCount = 1; clickCount <= count; clickCount += 1) {
-      await this.request(session, "mouse.down", {
+      await send("mouse.down", {
         x: start.x,
         y: start.y,
         button: event.button,
         clickCount,
-        ...(gestureId ? { gestureId } : {}),
       });
       await runWithInputCleanup(
         async () => {
           await assertTargetCurrent();
           if (event.kind === "drag") {
             const end = mapDisplayedPoint(event.end, session.viewport);
-            await this.request(session, "mouse.move", {
-              x: end.x,
-              y: end.y,
-              ...(gestureId ? { gestureId } : {}),
-            });
+            await send("mouse.move", { x: end.x, y: end.y });
             await assertTargetCurrent();
           }
         },
         async () => {
           const end =
             event.kind === "drag" ? mapDisplayedPoint(event.end, session.viewport) : start;
-          await this.request(session, "mouse.up", {
+          await send("mouse.up", {
             x: end.x,
             y: end.y,
             button: event.button,
             clickCount,
-            ...(gestureId ? { gestureId } : {}),
           });
         },
       );

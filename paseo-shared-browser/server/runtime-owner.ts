@@ -283,7 +283,7 @@ export async function createRuntimeOwner(
           await owned.runtime.insertText(data.text, gestureId);
           return null;
         case "text.insert":
-          await owned.runtime.insertText(String(data.text));
+          await owned.runtime.insertText(String(data.text), gestureId);
           return null;
         case "key.down":
           await owned.runtime.keyDown(String(data.key), String(data.key), gestureId);

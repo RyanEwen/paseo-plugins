@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentBrowserRuntime } from "./agent-browser-runtime";
 import { RUNTIME_OWNER_VARIABLE } from "./process-identity";
 
-const probe = vi.hoisted(() => ({ unreadable: false }));
+const probe = vi.hoisted(() => ({
+  unreadable: false,
+  /** Simulated /proc ownership for the OS-independent state-machine tests: pid -> start ticks. */
+  simulated: null as Map<number, string> | null,
+}));
 vi.mock("./process-identity", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./process-identity")>();
   return {
@@ -46,6 +50,7 @@ afterEach(async () => {
   cli.onClose = null;
   cli.closes = 0;
   probe.unreadable = false;
+  probe.simulated = null;
   vi.restoreAllMocks();
 });
 
@@ -200,54 +205,68 @@ describe("unverifiable daemon identity (platforms without /proc, unowned PIDs)",
   });
 });
 
-describe("unknown daemon state is never confirmed exit", () => {
-  it("fails closed, then recovers once the PID record is observable, when capture found no PID", async () => {
-    const f = await fixture(150);
-    const daemon = await ownChild(f.native.ownerNonce);
-    f.native.daemonLaunched = true; // launched, but the PID file is unreadable at capture
-    await f.native.captureDaemon();
-    expect(f.native.daemon).toBeNull();
-    const kill = vi.spyOn(process, "kill");
-    await expect(f.runtime.shutdown()).rejects.toThrow("not confirmed");
-    await expect(f.runtime.shutdown(true)).rejects.toThrow("not confirmed");
-    expect(kill).not.toHaveBeenCalledWith(daemon.pid, "SIGKILL");
-    expect(daemon.pid && alive(daemon.pid)).toBe(true);
-    // The record becomes readable again: shutdown re-captures, re-verifies and finishes.
-    await writeFile(join(f.ipc, "owned.pid"), String(daemon.pid));
-    await f.runtime.shutdown(true);
-    await exited(daemon);
-    expect(daemon.signalCode).toBe("SIGKILL");
-  });
+/** Real /proc ownership on Linux; an explicit simulation of it everywhere (macOS, Windows have no /proc). */
+const ownershipModes =
+  process.platform === "linux" ? (["real", "simulated"] as const) : (["simulated"] as const);
+describe.each(ownershipModes)(
+  "unknown daemon state is never confirmed exit (%s ownership)",
+  (mode) => {
+    /** Marks a child as this runtime's own daemon when ownership is simulated. */
+    const own = (daemon: ChildProcess) => {
+      if (mode === "simulated") probe.simulated = new Map([[daemon.pid as number, "42"]]);
+    };
+    it("fails closed, then recovers once the PID record is observable, when capture found no PID", async () => {
+      const f = await fixture(150);
+      const daemon = await ownChild(f.native.ownerNonce);
+      own(daemon);
+      own(daemon);
+      f.native.daemonLaunched = true; // launched, but the PID file is unreadable at capture
+      await f.native.captureDaemon();
+      expect(f.native.daemon).toBeNull();
+      const kill = vi.spyOn(process, "kill");
+      await expect(f.runtime.shutdown()).rejects.toThrow("not confirmed");
+      await expect(f.runtime.shutdown(true)).rejects.toThrow("not confirmed");
+      expect(kill).not.toHaveBeenCalledWith(daemon.pid, "SIGKILL");
+      expect(daemon.pid && alive(daemon.pid)).toBe(true);
+      // The record becomes readable again: shutdown re-captures, re-verifies and finishes.
+      await writeFile(join(f.ipc, "owned.pid"), String(daemon.pid));
+      await f.runtime.shutdown(true);
+      await exited(daemon);
+      expect(daemon.signalCode).toBe("SIGKILL");
+    });
 
-  it("does not treat a later unreadable identity as exit and never signals on it", async () => {
-    const f = await fixture(150);
-    const daemon = await ownChild(f.native.ownerNonce);
-    await f.recordPid(daemon.pid as number);
-    expect(f.native.daemon?.identity).toBeTruthy();
-    probe.unreadable = true;
-    const kill = vi.spyOn(process, "kill");
-    await expect(f.runtime.shutdown()).rejects.toThrow("not confirmed");
-    await expect(f.runtime.shutdown(true)).rejects.toThrow("not confirmed");
-    expect(kill).not.toHaveBeenCalledWith(daemon.pid, "SIGKILL");
-    expect(daemon.pid && alive(daemon.pid)).toBe(true);
-    await expect(readFile(join(f.ipc, "owned.sock"))).resolves.toBeDefined(); // metadata kept
-    // Identity is readable again: the original verification authorises the forced exit.
-    probe.unreadable = false;
-    await f.runtime.shutdown(true);
-    await exited(daemon);
-    expect(daemon.signalCode).toBe("SIGKILL");
-  });
+    it("does not treat a later unreadable identity as exit and never signals on it", async () => {
+      const f = await fixture(150);
+      const daemon = await ownChild(f.native.ownerNonce);
+      own(daemon);
+      own(daemon);
+      await f.recordPid(daemon.pid as number);
+      expect(f.native.daemon?.identity).toBeTruthy();
+      probe.unreadable = true;
+      const kill = vi.spyOn(process, "kill");
+      await expect(f.runtime.shutdown()).rejects.toThrow("not confirmed");
+      await expect(f.runtime.shutdown(true)).rejects.toThrow("not confirmed");
+      expect(kill).not.toHaveBeenCalledWith(daemon.pid, "SIGKILL");
+      expect(daemon.pid && alive(daemon.pid)).toBe(true);
+      await expect(readFile(join(f.ipc, "owned.sock"))).resolves.toBeDefined(); // metadata kept
+      // Identity is readable again: the original verification authorises the forced exit.
+      probe.unreadable = false;
+      await f.runtime.shutdown(true);
+      await exited(daemon);
+      expect(daemon.signalCode).toBe("SIGKILL");
+    });
 
-  it("shares one in-flight shutdown and never reports success after a failed one", async () => {
-    const f = await fixture(150);
-    const daemon = await ownChild();
-    await f.recordPid(daemon.pid as number); // unowned: observable, not signalled
-    const outcomes = await Promise.allSettled([f.runtime.shutdown(), f.runtime.shutdown()]);
-    expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "rejected"]);
-    await expect(f.runtime.shutdown()).rejects.toThrow("not confirmed");
-    daemon.kill("SIGKILL");
-    await exited(daemon);
-    await expect(f.runtime.shutdown()).resolves.toBeUndefined();
-    await expect(f.runtime.shutdown()).resolves.toBeUndefined();
-  });
-});
+    it("shares one in-flight shutdown and never reports success after a failed one", async () => {
+      const f = await fixture(150);
+      const daemon = await ownChild();
+      await f.recordPid(daemon.pid as number); // unowned: observable, not signalled
+      const outcomes = await Promise.allSettled([f.runtime.shutdown(), f.runtime.shutdown()]);
+      expect(outcomes.map((outcome) => outcome.status)).toEqual(["rejected", "rejected"]);
+      await expect(f.runtime.shutdown()).rejects.toThrow("not confirmed");
+      daemon.kill("SIGKILL");
+      await exited(daemon);
+      await expect(f.runtime.shutdown()).resolves.toBeUndefined();
+      await expect(f.runtime.shutdown()).resolves.toBeUndefined();
+    });
+  },
+);

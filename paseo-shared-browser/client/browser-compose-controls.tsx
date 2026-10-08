@@ -36,7 +36,20 @@ export function ComposeTextControls({
 }) {
   const handledRequest = useRef<number | null>(null);
   const [composeOpen, setComposeOpen] = useState(false);
-  const [draft, setDraft] = useState("");
+  // The input is host-owned (uncontrolled): echoing every character back through
+  // React state let a fast second keystroke be overwritten by a stale value.
+  // Latest text lives here; state changes only when emptiness flips or the draft resets.
+  const text = useRef("");
+  const generation = useRef(0);
+  const [hasText, setHasText] = useState(false);
+  const [inputKey, setInputKey] = useState(0);
+  const draftGeneration = generation.current;
+  const resetDraft = () => {
+    generation.current += 1;
+    text.current = "";
+    setHasText(false);
+    setInputKey(generation.current);
+  };
   const composeOwner = useRef<string | null>(null);
   const composeDocument = useRef<string | null>(null);
   const liveAuthority = useRef({ enabled, ownershipKey });
@@ -46,33 +59,43 @@ export function ComposeTextControls({
   const canRequestCommit = canRequestControl && composeDocument.current === documentKey;
   const closeCompose = () => {
     setComposeOpen(false);
-    setDraft("");
+    resetDraft();
     composeOwner.current = null;
     composeDocument.current = null;
   };
   const openCompose = () => {
     cancelInput();
+    resetDraft();
     composeOwner.current = ownershipKey;
     composeDocument.current = documentKey;
     setComposeOpen(true);
   };
+  // Callbacks are fenced to the draft that rendered them: a retained Done/Cancel
+  // from a closed draft must not publish, or close, a same-owner replacement.
   const commit = () => {
+    if (generation.current !== draftGeneration) return;
     // Consume before publication: a rapid second Done or retained old handler
     // must not repeat insertion or borrow a replacement page's control.
     if (
       !liveAuthority.current.enabled ||
       liveAuthority.current.ownershipKey !== ownershipKey ||
       composeOwner.current !== ownershipKey ||
-      !draft
+      !text.current
     )
       return;
     composeOwner.current = null;
-    if (composeText(draft)) {
+    const accepted = composeText(text.current);
+    // Publication may synchronously open a new draft; it owns the refs now.
+    if (generation.current !== draftGeneration) return;
+    if (accepted) {
       closeCompose();
     } else {
       // false means nothing was admitted, so the same draft remains reviewable.
       composeOwner.current = ownershipKey;
     }
+  };
+  const dismiss = () => {
+    if (generation.current === draftGeneration) closeCompose();
   };
   // Menu dismissal commits before this effect; the sheet is mounted outside the menu.
   useEffect(() => {
@@ -80,7 +103,7 @@ export function ComposeTextControls({
     handledRequest.current = request.id;
     if (enabled && request.ownershipKey === ownershipKey) {
       if (request.kind === "compose") openCompose();
-      else if (composeOpen && composeDocument.current === documentKey && draft) {
+      else if (composeOpen && composeDocument.current === documentKey && text.current) {
         composeOwner.current = ownershipKey;
         commit();
       }
@@ -93,7 +116,7 @@ export function ComposeTextControls({
         title="Compose text"
         open={composeOpen}
         onOpenChange={(open) => {
-          if (!open) closeCompose();
+          if (!open) dismiss();
         }}
       >
         <Modal.Content>
@@ -105,10 +128,16 @@ export function ComposeTextControls({
             <TextInput
               autoFocus
               multiline
-              value={draft}
+              key={inputKey}
+              defaultValue=""
               maxLength={16_000}
               accessibilityLabel="Text to compose"
-              onChangeText={setDraft}
+              onChangeText={(next) => {
+                // A callback retained from a closed or replaced draft must not write into the new one.
+                if (generation.current !== draftGeneration) return;
+                text.current = next;
+                setHasText(next.length > 0);
+              }}
               style={[styles.field, { minHeight: 100 }]}
             />
             {!canCommit ? (
@@ -117,14 +146,15 @@ export function ComposeTextControls({
               </Text>
             ) : null}
             <View style={styles.mobileRow}>
-              <ControlButton styles={styles} theme={theme} label="Cancel" onPress={closeCompose} />
+              <ControlButton styles={styles} theme={theme} label="Cancel" onPress={dismiss} />
               <ControlButton
                 styles={styles}
                 theme={theme}
                 label="Done"
                 primary
-                disabled={(!canCommit && !canRebindCommit && !canRequestCommit) || !draft}
+                disabled={(!canCommit && !canRebindCommit && !canRequestCommit) || !hasText}
                 onPress={() => {
+                  if (generation.current !== draftGeneration) return;
                   if (canCommit) {
                     commit();
                   } else if (canRebindCommit) {

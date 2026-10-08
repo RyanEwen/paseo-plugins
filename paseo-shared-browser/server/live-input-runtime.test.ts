@@ -172,6 +172,17 @@ describe("runtime-owned live input", () => {
     ]);
   });
 
+  it("discrete text and key input pinned to a channel never reach a navigated document", async () => {
+    const state = fixture();
+    await state.runtime.beginLiveInput("discrete");
+    state.control.documentGeneration++;
+    await expect(state.runtime.insertText("late", "discrete")).rejects.toThrow("attachment");
+    await expect(state.runtime.keyDown("Enter", "Enter", "discrete")).rejects.toThrow("attachment");
+    expect(
+      state.calls.filter((call) => /^Input\.(insertText|dispatchKeyEvent)$/.test(call.method)),
+    ).toEqual([]);
+  });
+
   it("acknowledged moves renew idle expiry but never the absolute five-minute limit", async () => {
     vi.useFakeTimers();
     const state = fixture();

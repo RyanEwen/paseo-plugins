@@ -1090,38 +1090,64 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Discrete input runs inside a short runtime-owned channel. The channel pins the
+   * CDP attachment and document, and the runtime re-checks it before every native
+   * primitive, so autonomous navigation after the metadata read cannot reach an
+   * unobserved page. Nothing is retried.
+   */
   private async dispatchInput(
     session: BrowserSession,
     event: BrowserInputEvent,
     target: InputTarget,
   ): Promise<void> {
+    const gestureId = this.issueUniqueToken();
+    await this.request(session, "input.begin", { gestureId });
+    try {
+      await this.dispatchPinnedInput(session, event, target, gestureId);
+    } finally {
+      // Releases anything still held, at the last published point on the original attachment.
+      await this.request(session, "input.end", { gestureId }).catch(() => undefined);
+    }
+  }
+
+  private async dispatchPinnedInput(
+    session: BrowserSession,
+    event: BrowserInputEvent,
+    target: InputTarget,
+    gestureId: string,
+  ): Promise<void> {
+    const send = (operation: string, input: Record<string, JsonValue>) =>
+      this.request(session, operation, { ...input, gestureId });
     const assertTargetCurrent = async () => {
       await this.refreshPageMetadata(session);
       this.requireRecentFrame(session, target);
     };
+    // Validate the captured document before any primitive, including text and keys.
+    await assertTargetCurrent();
     if (event.kind === "type") {
-      await this.request(session, "text.insert", { text: event.text });
+      await send("text.insert", { text: event.text });
       return;
     }
     if (event.kind === "key") {
-      await this.request(session, "key.down", { key: event.key });
+      await send("key.down", { key: event.key });
       try {
         await assertTargetCurrent();
       } finally {
-        await this.request(session, "key.up", { key: event.key });
+        await send("key.up", { key: event.key });
       }
       return;
     }
     if (event.kind === "move") {
       const point = mapDisplayedPoint(event.point, session.viewport);
-      await this.request(session, "mouse.move", { x: point.x, y: point.y });
+      await send("mouse.move", { x: point.x, y: point.y });
       return;
     }
     if (event.kind === "scroll") {
       const point = mapDisplayedPoint(event.point, session.viewport);
-      await this.request(session, "mouse.move", { x: point.x, y: point.y });
+      await send("mouse.move", { x: point.x, y: point.y });
       await assertTargetCurrent();
-      await this.request(session, "mouse.wheel", {
+      await send("mouse.wheel", {
         x: point.x,
         y: point.y,
         deltaX: event.deltaX,
@@ -1133,11 +1159,11 @@ export class SessionManager {
       event.kind === "drag" ? event.start : event.point,
       session.viewport,
     );
-    await this.request(session, "mouse.move", { x: start.x, y: start.y });
+    await send("mouse.move", { x: start.x, y: start.y });
     await assertTargetCurrent();
     const count = event.kind === "click" ? event.clickCount : 1;
     for (let clickCount = 1; clickCount <= count; clickCount += 1) {
-      await this.request(session, "mouse.down", {
+      await send("mouse.down", {
         x: start.x,
         y: start.y,
         button: event.button,
@@ -1147,12 +1173,12 @@ export class SessionManager {
         await assertTargetCurrent();
         if (event.kind === "drag") {
           const end = mapDisplayedPoint(event.end, session.viewport);
-          await this.request(session, "mouse.move", { x: end.x, y: end.y });
+          await send("mouse.move", { x: end.x, y: end.y });
           await assertTargetCurrent();
         }
       } finally {
         const end = event.kind === "drag" ? mapDisplayedPoint(event.end, session.viewport) : start;
-        await this.request(session, "mouse.up", {
+        await send("mouse.up", {
           x: end.x,
           y: end.y,
           button: event.button,

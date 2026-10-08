@@ -899,7 +899,7 @@ export class AgentBrowserRuntime {
     if (parsed.type === "up") this.heldKeys.delete(parsed.code);
   }
 
-  async keyDown(key: string, code = key): Promise<void> {
+  async keyDown(key: string, code = key, gestureId?: string): Promise<void> {
     await this.dispatchInput(
       "Input.dispatchKeyEvent",
       {
@@ -908,13 +908,13 @@ export class AgentBrowserRuntime {
         code,
         text: key.length === 1 ? key : undefined,
       },
-      undefined,
+      gestureId,
       () => this.heldKeys.set(code, { key, code }),
     );
   }
 
-  async keyUp(key: string, code = key): Promise<void> {
-    await this.dispatchInput("Input.dispatchKeyEvent", { type: "keyUp", key, code });
+  async keyUp(key: string, code = key, gestureId?: string): Promise<void> {
+    await this.dispatchInput("Input.dispatchKeyEvent", { type: "keyUp", key, code }, gestureId);
     this.heldKeys.delete(code);
   }
 

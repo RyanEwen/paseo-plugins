@@ -88,6 +88,8 @@ class AgentRuntimeOwner implements RuntimeOwner<AgentRuntime> {
       case "text.insert":
       case "key.down":
       case "key.up":
+      case "input.begin":
+      case "input.end":
         return null;
       default:
         throw new Error(`Unexpected runtime operation: ${operation}`);

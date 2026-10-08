@@ -113,7 +113,13 @@ it("shares and persists a production agent-browser runtime across supervisor cli
       setTimeout(() => response.end(page), 100);
       return;
     }
-    response.end(page);
+    // Stream recovery after fallback needs sustained paint events, which a static
+    // page never produces. The cookie page animates so recovery is observable.
+    response.end(
+      url.pathname === "/set-cookie"
+        ? `${page}<style>@keyframes pulse{50%{opacity:.5}}</style><div style="width:8px;height:8px;background:#0a0;animation:pulse .1s infinite"></div>`
+        : page,
+    );
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -318,16 +324,20 @@ it("shares and persists a production agent-browser runtime across supervisor cli
       action: { kind: "goto", url: `${origin}/set-cookie` },
     });
     await vi.waitFor(() => expect(lastUserAgent).toContain("Pixel 7"));
-    await vi.waitFor(async () => {
-      // Only the default quality requests the shared CDP stream. Other viewer
-      // qualities intentionally use screenshots without restarting that stream.
-      const resumedCapture = await manager.capture(
-        resumed.viewerToken,
-        DEFAULT_CAPTURE_QUALITY,
-        null,
-      );
-      expect(resumedCapture.frame?.transport).toBe("cdp-screencast");
-    });
+    await vi.waitFor(
+      async () => {
+        // Only the default quality requests the shared CDP stream. Other viewer
+        // qualities intentionally use screenshots without restarting that stream.
+        // Leaving fallback needs a 1.5s dwell plus sustained paint events.
+        const resumedCapture = await manager.capture(
+          resumed.viewerToken,
+          DEFAULT_CAPTURE_QUALITY,
+          null,
+        );
+        expect(resumedCapture.frame?.transport).toBe("cdp-screencast");
+      },
+      { timeout: 10_000, interval: 250 },
+    );
     console.log("browser-smoke: emulated");
 
     manager.disconnect();

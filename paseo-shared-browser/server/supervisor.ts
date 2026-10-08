@@ -7,7 +7,6 @@ import { dirname, join } from "node:path";
 import type { ZodType } from "zod";
 import type { BrowserFrame, BrowserState } from "../shared/browser";
 import {
-  applyDevicePresetRpc,
   beginBrowserGestureRpc,
   captureBrowserRpc,
   endBrowserGestureRpc,
@@ -589,15 +588,6 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
             controlToken,
             expected,
             viewport: data.viewport,
-          }),
-        );
-      } else if (operation === "device") {
-        result = await this.browserPolicy.applyDevicePreset(
-          parseAgentInput(applyDevicePresetRpc.input, {
-            viewerToken,
-            controlToken,
-            expected,
-            presetId: data.presetId,
           }),
         );
       } else if (operation === "input") {

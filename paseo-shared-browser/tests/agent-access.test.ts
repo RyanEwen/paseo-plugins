@@ -18,6 +18,7 @@ import {
 } from "../server/supervisor";
 import { AgentSupervisorClient, SupervisorClient } from "../server/supervisor-client";
 import type { BrowserState } from "../shared/browser";
+import { DEFAULT_CAPTURE_QUALITY, JPEG_QUALITY } from "../shared/capture-settings";
 
 interface AgentRuntime extends RuntimeInstance {
   workspaceId: string;
@@ -408,6 +409,55 @@ describe("agent shared-browser authorization", () => {
       event: { kind: "type", text: "Valid committed text" },
     });
     expect(published.filter((operation) => operation === "text.insert")).toEqual(["text.insert"]);
+  });
+
+  it("enforces the 1600x1200 agent viewport at the raw ticket boundary, before any mutation", async () => {
+    const { owner, supervisor, bridge } = createHarness();
+    const agentTicket = ticket("viewport-cap");
+    await issueTicket(supervisor, bridge, agentTicket);
+    await bindTicket(supervisor, bridge, agentTicket, "agent-one", "workspace-one");
+    await agentRequest(supervisor, agentTicket, "acquire-control");
+    const published: string[] = [];
+    const original = owner.request.bind(owner);
+    owner.request = async (runtime, operation, input) => {
+      published.push(operation);
+      return original(runtime, operation, input);
+    };
+    for (const viewport of [
+      { width: 1601, height: 1200 },
+      { width: 1600, height: 1201 },
+      { width: 2560, height: 2560 },
+    ]) {
+      await expect(
+        agentRequest(supervisor, agentTicket, "viewport", { viewport }),
+      ).rejects.toMatchObject({
+        code: "INVALID_REQUEST",
+        message: "Invalid agent browser request",
+      });
+    }
+    expect(published.filter((operation) => operation === "emulate")).toEqual([]);
+    await agentRequest(supervisor, agentTicket, "viewport", {
+      viewport: { width: 1600, height: 1200 },
+    });
+    expect(published.filter((operation) => operation === "emulate")).toEqual(["emulate"]);
+  });
+
+  it("keeps every explicit agent capture quality and defaults only when omitted", async () => {
+    const { owner, supervisor, bridge } = createHarness();
+    const agentTicket = ticket("capture-quality");
+    await issueTicket(supervisor, bridge, agentTicket);
+    await bindTicket(supervisor, bridge, agentTicket, "agent-one", "workspace-one");
+    const qualities: unknown[] = [];
+    const original = owner.request.bind(owner);
+    owner.request = async (runtime, operation, input) => {
+      if (operation === "frame") qualities.push((input as { quality?: unknown }).quality);
+      return original(runtime, operation, input);
+    };
+    await agentRequest(supervisor, agentTicket, "capture", {});
+    await agentRequest(supervisor, agentTicket, "capture", { quality: "high" });
+    await agentRequest(supervisor, agentTicket, "capture", { quality: "low" });
+    expect(qualities).toEqual([JPEG_QUALITY.medium, JPEG_QUALITY.high, JPEG_QUALITY.low]);
+    expect(DEFAULT_CAPTURE_QUALITY).toBe("medium");
   });
 
   it("uses an opaque agent ticket without claiming or fencing the admin bridge", async () => {

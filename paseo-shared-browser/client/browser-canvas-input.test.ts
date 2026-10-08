@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BrowserGestureEvent } from "../shared/browser";
-import { createBrowserCanvasInput } from "./browser-canvas-input";
+import { createBrowserCanvasInput, liveInputAllowed } from "./browser-canvas-input";
 
 const point = { x: 40, y: 20, width: 400, height: 300 };
 function fixture() {
@@ -92,5 +92,15 @@ describe("natural canvas input", () => {
       ["end", []],
     ]);
     expect(f.ended()).toBe(1);
+  });
+});
+
+describe("live input gate", () => {
+  const open = { canSendInput: true, mutationPending: false, modalOpen: false };
+  it("forwards only with no pending mutation and no open modal (resolution dialog included)", () => {
+    expect(liveInputAllowed(open)).toBe(true);
+    expect(liveInputAllowed({ ...open, modalOpen: true })).toBe(false);
+    expect(liveInputAllowed({ ...open, mutationPending: true })).toBe(false);
+    expect(liveInputAllowed({ ...open, canSendInput: false })).toBe(false);
   });
 });

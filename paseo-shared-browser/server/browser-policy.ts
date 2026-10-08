@@ -383,23 +383,23 @@ export class SessionManager {
       this.requireMutationAccess(session, input);
       await this.cancelGesture(session);
       assertViewport(input.viewport);
+      // A custom size changes dimensions only: the active profile keeps its
+      // mobile/touch/density/UA/platform/capture density and stays selected.
+      const preset = DEVICE_PRESETS.find(({ id }) => id === session.devicePresetId);
       if (
         session.viewport.width !== input.viewport.width ||
-        session.viewport.height !== input.viewport.height ||
-        session.devicePresetId !== null
+        session.viewport.height !== input.viewport.height
       ) {
         await this.request(session, "emulate", {
           ...input.viewport,
-          deviceScaleFactor: 1,
-          mobile: false,
-          touch: false,
-          userAgent: session.defaultUserAgent,
-          platform: "",
+          deviceScaleFactor: preset?.deviceScaleFactor ?? 1,
+          captureScale: session.captureScale,
+          mobile: preset?.isMobile ?? false,
+          touch: preset?.hasTouch ?? false,
+          userAgent: session.userAgent,
+          platform: preset?.platform ?? "",
         });
         session.viewport = { ...input.viewport };
-        session.devicePresetId = null;
-        session.captureScale = 1;
-        session.userAgent = session.defaultUserAgent;
         session.viewportGeneration += 1;
         this.invalidateFrames(session);
       }

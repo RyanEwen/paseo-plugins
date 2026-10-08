@@ -104,11 +104,12 @@ The plugin automatically injects its stdio MCP adapter only when a new, non-inte
 created with a provider that accepts external MCP servers. Agents that already exist, resumed
 sessions, imported sessions, and Paseo's internal agents are not modified. Paseo's built-in OMP
 provider accepts session MCP servers from Paseo 0.11, so new OMP agents receive the adapter there.
-Pi agents also receive the adapter, but require Pi's optional MCP support to
+On Paseo 0.9 and 0.10 the built-in OMP adapter rejects external MCP servers, so OMP agents are left
+unchanged. Pi agents continue to receive the adapter, but they require Pi's optional MCP support to
 launch it.
 
 The injected MCP server exposes exactly these tools: `shared_browser_status`,
-`shared_browser_capture`, `shared_browser_device`, `shared_browser_acquire_control`, `shared_browser_release_control`,
+`shared_browser_capture`, `shared_browser_acquire_control`, `shared_browser_release_control`,
 `shared_browser_navigate`, `shared_browser_input`, and `shared_browser_viewport`. It does not
 expose arbitrary CDP commands, JavaScript or page evaluation, browser profile access, or filesystem
 access.
@@ -140,7 +141,9 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
 - Toolbar: back, forward, reload, address bar, a combined monitor menu, mobile emulation toggle
   and a vertical-dots browser actions menu. Icon controls expose their action name
   as a hover tooltip on desktop/web and retain native accessibility labels.
-- Custom viewports support 320 to 2560 pixels wide and 480 to 2560 pixels high. Invalid sizes
+- Custom viewports support 320 to 2560 pixels wide and 480 to 2560 pixels high. Applying one
+  changes only the dimensions; the active profile's mobile mode, touch, user agent and capture
+  density are kept. Invalid sizes
   show their error inside the device dialog; a successful Apply closes it.
 - Desktop presets also include 1280 × 800 (16:10) and 1280 × 1280 (1:1).
 - Pixel 7 (high resolution) keeps the same 412 × 839 phone layout and input coordinates,
@@ -164,7 +167,7 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
   page instead. Fitting images stay centered without empty scroll ranges; a scrollbar on
   one axis does not force one on the other. Returning to Fit resets local offsets without
   reloading the page or image.
-- Quality choices Low, Medium and High request JPEG quality 70, 90 and 95 respectively.
+- Quality choices Low, Medium and High request JPEG quality 40, 65 and 85 respectively (Medium is the default).
   Detailed large views use more bandwidth; frames reduce quality further only if they
   exceed the 800 KB frame limit. Preferences persist on the connected Paseo host.
 - Captures refresh after input. A stalled screencast falls back to a fresh screenshot instead
@@ -205,10 +208,15 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
   keys open beside the menu; on compact screens, Back returns to the parent menu. Extra keys
   are no longer shown below the canvas or in a separate dialog.
 - On native phones, Keyboard in that menu opens the software keyboard for basic live typing
-  and Backspace
-  without a visible text box. Autocorrection is disabled. Compose opens an explicit local
-  draft for IME text, inserted once with Done. Native hardware shortcuts are not supported
-  by this software-keyboard relay. Extra keys remain available in the Send keys submenu.
+  and Backspace without a visible text box. Autocorrection is disabled. Native hardware
+  shortcuts are not supported by this software-keyboard relay. Extra keys remain available in
+  the Send keys submenu.
+- On native phones and compact web layouts, Compose text opens a visible local draft. **Insert**
+  sends it once to the focused page field and **Insert and Enter** also presses Enter. It
+  requires human control and is independent of the live software-keyboard relay.
+  Software-keyboard behavior still needs physical-device testing.
+- While the Resolution and quality dialog or a toolbar menu is open, canvas input is not
+  forwarded and held gestures are cancelled.
 - Local plain-text paste is forwarded; remote copy/cut are not synchronized to the local clipboard.
 - The address-bar mobile toggle changes shared emulation while preserving the current display
   dimensions and capture density. Choose a resolution explicitly to change the display.

@@ -336,11 +336,15 @@ export function createBrowserInputQueue(options: QueueOptions) {
         let pressTarget: BrowserGestureAuthority["target"] | undefined;
         if (needsFreshPress(command.event, owned)) {
           let fresh = options.authority();
-          if (fresh && invalidatedFrameId === fresh.target.frameId && options.waitForFrame) {
-            // Earlier input revoked the visible receipt. Wait a bounded time for a
-            // newer decoded one; elapsed time alone never admits a press, and the
+          // Video revokes its receipt as soon as input is acknowledged, leaving no
+          // actionable authority until the next frame paints; JPEG keeps the spent
+          // frame visible. Both mean this press needs a newer decoded receipt.
+          const visibleId = fresh?.target.frameId ?? owned.authority.target.frameId;
+          const spent = invalidatedFrameId === visibleId;
+          if (spent && options.waitForFrame) {
+            // Wait a bounded time; elapsed time alone never admits a press, and the
             // server refuses a spent or expired receipt regardless.
-            await options.waitForFrame(fresh.target.frameId);
+            await options.waitForFrame(visibleId);
             if (currentEpoch !== epoch) break;
             fresh = options.authority();
           }
@@ -349,7 +353,7 @@ export function createBrowserInputQueue(options: QueueOptions) {
               throw new Error("Browser input context changed. Release the gesture and try again.");
             }
             pressTarget = fresh.target;
-          } else if (owned.authority.target.frameId !== invalidatedFrameId) {
+          } else if (!spent) {
             // Display was revoked after admission but before this first press; the
             // receipt begin just validated is still unspent. The server re-checks it.
             pressTarget = owned.authority.target;

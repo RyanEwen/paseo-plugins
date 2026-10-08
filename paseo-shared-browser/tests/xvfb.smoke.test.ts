@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createRuntimeOwner } from "../server/runtime-owner";
+import { resolveBrowserRuntimeRoot } from "../server/runtime-path";
 import type { JsonValue } from "../server/runtime-protocol";
 import { RuntimeSupervisor } from "../server/supervisor";
 import type { BrowserState } from "../shared/browser";
@@ -51,14 +52,13 @@ async function harness(env: Record<string, string | undefined>, virtualDisplay?:
   roots.push(root);
   process.env.TMPDIR = root;
   process.env.PASEO_HOME = join(root, "home");
-  process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY ??= join(
-    process.cwd(),
-    "node_modules",
-    "agent-browser",
-    "bin",
-    `agent-browser-linux-${process.arch === "arm64" ? "arm64" : "x64"}`,
-  );
-  process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE ??= "/usr/bin/chromium";
+  // Same resolution as browser.smoke: explicit overrides, else the runtime prepared in the original PASEO_HOME.
+  const runtimeRoot = resolveBrowserRuntimeRoot(saved.PASEO_HOME ?? join(homedir(), ".paseo"));
+  process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY =
+    saved.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY ??
+    join(runtimeRoot, "node_modules", ".bin", "agent-browser");
+  process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE =
+    saved.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE ?? join(runtimeRoot, "chromium", "chrome");
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;

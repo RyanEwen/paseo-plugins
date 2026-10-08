@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { SessionManager } from "../server/browser";
 import { createRuntimeOwner } from "../server/runtime-owner";
+import { resolveBrowserRuntimeRoot } from "../server/runtime-path";
 import { resolveSupervisorPaths, startSupervisorServer } from "../server/supervisor";
 import { SupervisorClient } from "../server/supervisor-client";
 import type { BrowserFrame, BrowserGestureEvent, BrowserState } from "../shared/browser";
@@ -27,11 +28,31 @@ const target = (frame: BrowserFrame) => ({
  * handlers) are deliberately not asserted either way.
  */
 it("releases a cancelled held drag at its last pointer position and drops late channel input", async () => {
-  const binaryPath = process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY;
-  const executablePath = process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE;
-  if (!binaryPath || !executablePath)
-    throw new Error("Set PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY and _CHROMIUM_EXECUTABLE");
+  // Same resolution as browser.smoke: explicit overrides, else the prepared runtime in PASEO_HOME.
+  const preparedHome = process.env.PASEO_HOME;
+  // The prepared runtime is consulted only for an executable without an override.
+  let runtimeRoot: string | null = null;
+  const preparedRuntime = () => {
+    if (!preparedHome) throw new Error("Set an isolated, prepared PASEO_HOME");
+    runtimeRoot ??= resolveBrowserRuntimeRoot(preparedHome);
+    return runtimeRoot;
+  };
+  const binaryPath =
+    process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY ??
+    join(
+      preparedRuntime(),
+      "node_modules",
+      ".bin",
+      process.platform === "win32" ? "agent-browser.exe" : "agent-browser",
+    );
+  const executablePath =
+    process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE ??
+    join(preparedRuntime(), "chromium", process.platform === "win32" ? "chrome.exe" : "chrome");
   await Promise.all([access(binaryPath), access(executablePath)]);
+  const previousBinary = process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY;
+  const previousExecutable = process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE;
+  process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY = binaryPath;
+  process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE = executablePath;
 
   const pageEvents: string[] = [];
   const server = createServer((request, response) => {
@@ -149,6 +170,11 @@ it("releases a cancelled held drag at its last pointer position and drops late c
   } finally {
     manager.disconnect();
     await running.close();
+    if (previousBinary === undefined) delete process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY;
+    else process.env.PASEO_SHARED_BROWSER_AGENT_BROWSER_BINARY = previousBinary;
+    if (previousExecutable === undefined)
+      delete process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE;
+    else process.env.PASEO_SHARED_BROWSER_CHROMIUM_EXECUTABLE = previousExecutable;
     if (previous === undefined) delete process.env.PASEO_HOME;
     else process.env.PASEO_HOME = previous;
     await new Promise<void>((resolve, reject) =>

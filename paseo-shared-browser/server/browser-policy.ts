@@ -1761,24 +1761,16 @@ export class SessionManager {
     };
   }
 
-  /** A discrete text, key or press owns one private native channel pinned to the original
-   * attachment and document. The ID is
-   * never returned to callers and grants no agent continuation. Native end uses
-   * the original page even after navigation, revocation or a lost down ACK. */
+  /** Every discrete native primitive (text, key, press, hover, wheel) runs on one private
+   * channel pinned to the original attachment and document, which the runtime re-checks
+   * before each publication. The ID is never returned to callers and grants no agent
+   * continuation. Native end uses the original page even after navigation, revocation
+   * or a lost down ACK. */
   private async dispatchDiscreteInput(
     session: BrowserSession,
     event: BrowserInputEvent,
     assertTargetCurrent: () => Promise<void>,
   ): Promise<void> {
-    if (
-      event.kind !== "type" &&
-      event.kind !== "key" &&
-      event.kind !== "click" &&
-      event.kind !== "drag"
-    ) {
-      await this.dispatchInput(session, event, assertTargetCurrent);
-      return;
-    }
     if (session.inputGeneration === null) {
       throw new Error("Browser input identity is unavailable");
     }
@@ -1799,45 +1791,47 @@ export class SessionManager {
     session: BrowserSession,
     event: BrowserInputEvent,
     assertTargetCurrent: () => Promise<void>,
-    gestureId?: string,
+    gestureId: string,
   ): Promise<void> {
-    // Hover keeps its existing fast path. It must not wait behind page metadata
-    // while video is pending; the initial control/frame checks still apply.
+    // Hover keeps its existing fast path: it must not wait behind page metadata
+    // while video is pending. The pinned channel still refuses a replaced
+    // attachment or document without any metadata round trip.
     if (event.kind === "move") {
       const point = mapDisplayedPoint(event.point, session.viewport);
-      await this.request(session, "mouse.move", { x: point.x, y: point.y });
+      await this.request(session, "mouse.move", { x: point.x, y: point.y, gestureId });
       return;
     }
     await assertTargetCurrent();
     if (event.kind === "type") {
       await this.request(session, "text.insert", {
         text: event.text,
-        ...(gestureId ? { gestureId } : {}),
+        gestureId,
       });
       return;
     }
     if (event.kind === "key") {
       await this.request(session, "key.down", {
         key: event.key,
-        ...(gestureId ? { gestureId } : {}),
+        gestureId,
       });
       await runWithInputCleanup(assertTargetCurrent, () =>
         this.request(session, "key.up", {
           key: event.key,
-          ...(gestureId ? { gestureId } : {}),
+          gestureId,
         }),
       );
       return;
     }
     if (event.kind === "scroll") {
       const point = mapDisplayedPoint(event.point, session.viewport);
-      await this.request(session, "mouse.move", { x: point.x, y: point.y });
+      await this.request(session, "mouse.move", { x: point.x, y: point.y, gestureId });
       await assertTargetCurrent();
       await this.request(session, "mouse.wheel", {
         x: point.x,
         y: point.y,
         deltaX: event.deltaX,
         deltaY: event.deltaY,
+        gestureId,
       });
       return;
     }
@@ -1848,7 +1842,7 @@ export class SessionManager {
     await this.request(session, "mouse.move", {
       x: start.x,
       y: start.y,
-      ...(gestureId ? { gestureId } : {}),
+      gestureId,
     });
     await assertTargetCurrent();
     const count = event.kind === "click" ? event.clickCount : 1;
@@ -1858,7 +1852,7 @@ export class SessionManager {
         y: start.y,
         button: event.button,
         clickCount,
-        ...(gestureId ? { gestureId } : {}),
+        gestureId,
       });
       await runWithInputCleanup(
         async () => {
@@ -1868,7 +1862,7 @@ export class SessionManager {
             await this.request(session, "mouse.move", {
               x: end.x,
               y: end.y,
-              ...(gestureId ? { gestureId } : {}),
+              gestureId,
             });
             await assertTargetCurrent();
           }
@@ -1881,7 +1875,7 @@ export class SessionManager {
             y: end.y,
             button: event.button,
             clickCount,
-            ...(gestureId ? { gestureId } : {}),
+            gestureId,
           });
         },
       );

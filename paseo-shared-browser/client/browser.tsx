@@ -1711,11 +1711,11 @@ export function SharedBrowserPanel({
         </View>
       </View>
 
-      {runtimeNotice || visibleError ? (
+      {runtimeNotice || visibleError || state?.notice ? (
         <ErrorNotice
           styles={styles}
           theme={theme}
-          message={runtimeNotice ?? visibleError ?? ""}
+          message={runtimeNotice ?? visibleError ?? state?.notice ?? ""}
           action={connectionError || reconnecting ? "Reconnect" : undefined}
           onAction={connectionError || reconnecting ? reconnect : undefined}
           actionDisabled={attachQuery.isFetching}

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { chmod, mkdir, readFile, rm } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -46,6 +47,12 @@ import {
   NAVIGATION_METADATA_TIMEOUT_MS,
 } from "./navigation-budget";
 import { waitForNavigationCommit } from "./navigation-commit";
+import {
+  type ProcessIdentity,
+  probeProcess,
+  processExists,
+  RUNTIME_OWNER_VARIABLE,
+} from "./process-identity";
 import { createScreencastSourceTime } from "./screencast-source-time";
 import { createVideoSourceRecovery } from "./video-source-recovery";
 
@@ -55,6 +62,8 @@ const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SCREENCAST_SETUP_RETRY_MS = 25;
+/** Bound for the agent-browser session daemon to exit after close or SIGKILL. */
+const DAEMON_EXIT_WAIT_MS = 5_000;
 // Cursor decoration must not hold the serialized input/video fence while page
 // scripts are busy. A missed sample leaves input and its cleanup unchanged.
 const CURSOR_SAMPLE_TIMEOUT_MS = 250;
@@ -140,6 +149,8 @@ export interface AgentBrowserRuntimeOptions {
   /** Trusted per-instance private X11 context, only DISPLAY/XAUTHORITY; never mutates host environment. */
   launchEnvironment?: Readonly<Record<string, string>>;
   timeoutMs?: number;
+  /** Bound for the session daemon to exit after close or SIGKILL. */
+  daemonExitWaitMs?: number;
 }
 
 interface VersionResult {
@@ -167,7 +178,8 @@ function requireAbsolute(path: string, label: string): string {
 
 function runtimeEnvironment(
   ipcDirectory: string,
-  launchEnvironment?: Readonly<Record<string, string>>,
+  launchEnvironment: Readonly<Record<string, string>> | undefined,
+  ownerNonce: string,
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const key of [
@@ -217,6 +229,7 @@ function runtimeEnvironment(
     // A private X11 display must not inherit an unrelated host Wayland session.
     delete environment.WAYLAND_DISPLAY;
   }
+  environment[RUNTIME_OWNER_VARIABLE] = ownerNonce;
   environment.AGENT_BROWSER_SOCKET_DIR = ipcDirectory;
   environment.AGENT_BROWSER_IDLE_TIMEOUT_MS = "0";
   environment.AGENT_BROWSER_STREAM_PORT = "0";
@@ -257,6 +270,9 @@ export class AgentBrowserRuntime {
   private readonly headed: boolean;
   private readonly timeoutMs: number;
   private readonly environment: NodeJS.ProcessEnv;
+  private daemon: { pid: number; identity: ProcessIdentity | null } | null = null;
+  private readonly ownerNonce = randomUUID();
+  private readonly daemonExitWaitMs: number;
   private connection: CdpConnection | null = null;
   private page: CdpSession | null = null;
   private targetId: string | null = null;
@@ -295,6 +311,10 @@ export class AgentBrowserRuntime {
     timer: ReturnType<typeof setTimeout> | null;
   } | null = null;
   private stopping = false;
+  private shutdownInFlight: Promise<void> | null = null;
+  private shutDown = false;
+  /** A daemon was launched for this session, so absence of evidence is not proof of exit. */
+  private daemonLaunched = false;
   private video: NativeVideoCapture | null = null;
   private videoRetirement: Promise<void> | null = null;
   private ownsBrowser = true;
@@ -313,7 +333,12 @@ export class AgentBrowserRuntime {
     this.session = options.session;
     this.headed = options.headed ?? false;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.environment = runtimeEnvironment(this.ipcDirectory, options.launchEnvironment);
+    this.daemonExitWaitMs = options.daemonExitWaitMs ?? DAEMON_EXIT_WAIT_MS;
+    this.environment = runtimeEnvironment(
+      this.ipcDirectory,
+      options.launchEnvironment,
+      this.ownerNonce,
+    );
     this.initialUrl = options.initialUrl ?? "about:blank";
   }
 
@@ -340,6 +365,9 @@ export class AgentBrowserRuntime {
       .filter(Boolean)
       .join(",");
     this.ownsBrowser = true;
+    // From here a nonce-owned daemon may exist even if open rejects (e.g. navigation failure).
+    this.daemonLaunched = true;
+    this.daemon = null;
     const opened = await this.invoke([
       "--session",
       this.session,
@@ -360,6 +388,7 @@ export class AgentBrowserRuntime {
     this.assertRuntimeOpen();
     const targetId = findString(opened, ["targetId", "target_id"]);
     await this.protectIpcMetadata();
+    await this.captureDaemon();
     this.assertRuntimeOpen();
     await this.connectCdp(targetId);
   }
@@ -1679,8 +1708,24 @@ export class AgentBrowserRuntime {
     ]);
   }
 
+  /**
+   * Concurrent callers share one in-flight shutdown; a failed one is not remembered as
+   * success, so a later call retries and reports the same unconfirmed state.
+   */
   async shutdown(force = false): Promise<void> {
-    if (this.stopping) return;
+    if (this.shutDown) return;
+    if (this.shutdownInFlight) return this.shutdownInFlight;
+    const operation = this.performShutdown(force);
+    this.shutdownInFlight = operation;
+    try {
+      await operation;
+      this.shutDown = true;
+    } finally {
+      if (this.shutdownInFlight === operation) this.shutdownInFlight = null;
+    }
+  }
+
+  private async performShutdown(force: boolean): Promise<void> {
     this.stopping = true;
     this.jpegDemand.close();
     this.screencastActive = false;
@@ -1689,31 +1734,86 @@ export class AgentBrowserRuntime {
       if (this.liveInput) await this.endLiveInput(this.liveInput.id);
       await this.releaseHeldInput();
       this.invalidateScreencastFrame();
-      if (this.ownsBrowser && !force) {
-        try {
-          await this.invoke(["--session", this.session, "--json", "close"]);
-        } catch {
-          this.stopping = false;
-          await this.shutdown(true);
-          return;
-        }
-      } else if (this.ownsBrowser) {
-        const pid = await this.daemonPid();
-        if (pid !== null) {
-          try {
-            process.kill(pid, "SIGKILL");
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-          }
-        }
-        await this.removeIpcMetadata();
-      }
+      // Only the controller that launched the browser owns its session daemon.
+      if (this.ownsBrowser) await this.stopDaemon(force);
       this.connection?.close();
       this.connection = null;
       this.page = null;
       this.targetId = null;
       this.invalidateScreencastFrame();
     });
+  }
+
+  /** Close, then require observed exit; escalate to a verified-owned SIGKILL and observe that too. */
+  private async stopDaemon(force: boolean): Promise<void> {
+    let forced = force;
+    if (!forced) {
+      try {
+        await this.invoke(["--session", this.session, "--json", "close"]);
+      } catch {
+        forced = true;
+      }
+      // close returns before the session daemon exits. A same-session relaunch would reach
+      // that daemon with its original launch environment (e.g. a stopped private display).
+      if (!forced && !(await this.daemonExited())) forced = true;
+    }
+    if (forced) await this.terminateDaemon();
+    if (forced || this.daemonLaunched) await this.removeIpcMetadata();
+    this.daemonLaunched = false;
+    this.daemon = null;
+  }
+
+  /**
+   * Records the PID-file daemon. Only a PID whose environment carries this runtime's own
+   * nonce gets a verified identity; anything else is observable but never signalled.
+   */
+  private async captureDaemon(): Promise<void> {
+    const pid = await this.daemonPid();
+    if (pid === null) return;
+    const probe = await probeProcess(pid, this.ownerNonce);
+    this.daemon = { pid, identity: probe.status === "owned" ? probe.identity : null };
+  }
+
+  /**
+   * Observes the daemon this runtime launched. Only `gone` is a positive exit; `unknown`
+   * (no PID record, unreadable identity) is never success and never authorises a signal.
+   */
+  private async daemonState(): Promise<"gone" | "owned" | "alive" | "unknown"> {
+    if (!this.daemonLaunched) return "gone";
+    if (!this.daemon) {
+      await this.captureDaemon();
+      if (!this.daemon) return "unknown";
+    }
+    const { pid, identity } = this.daemon;
+    if (!identity) return processExists(pid) ? "alive" : "gone";
+    const probe = await probeProcess(pid, this.ownerNonce);
+    if (probe.status === "absent" || probe.status === "foreign") return "gone";
+    if (probe.status === "owned")
+      return probe.identity.startTicks === identity.startTicks ? "owned" : "gone";
+    return processExists(pid) ? "unknown" : "gone";
+  }
+
+  /** True only after positive observation of exit, within the bound. */
+  private async daemonExited(): Promise<boolean> {
+    for (const deadline = Date.now() + this.daemonExitWaitMs; Date.now() < deadline; ) {
+      if ((await this.daemonState()) === "gone") return true;
+      await new Promise((resolve) => setTimeout(resolve, SCREENCAST_SETUP_RETRY_MS));
+    }
+    return (await this.daemonState()) === "gone";
+  }
+
+  /** Signals only a daemon freshly re-verified as owned, then confirms its exit. */
+  private async terminateDaemon(): Promise<void> {
+    if ((await this.daemonState()) === "owned" && this.daemon) {
+      try {
+        process.kill(this.daemon.pid, "SIGKILL");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      }
+    }
+    // Unverified or unknown daemons are never signalled, but exit must still be observed.
+    if (!(await this.daemonExited()))
+      throw new AgentBrowserUnavailableError("agent-browser daemon exit was not confirmed");
   }
 
   private async assertVersion(): Promise<void> {

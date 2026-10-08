@@ -68,11 +68,7 @@ retaining the separate native idle limit; idle expiry releases once and grants
 no replay.
 
 Headless Linux Chromium can lack pointer/hover media even when mouse events work.
-When existing Xvfb is available, a private authenticated display supplies native
-desktop mouse capabilities and survives touch-disable and CDP reconnect. Desktop
--> phone -> desktop preserves the current document and draft. Missing Xvfb retains
-headless behavior; other operating systems are outside this verified correction.
-Do not compensate by changing PrintStream styling or resetting the page per toggle.
+Opt-in private Xvfb support is documented separately in README.
 
 ## Primary references
 

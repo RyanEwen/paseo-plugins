@@ -51,7 +51,7 @@ import { runWithInputCleanup } from "./input-cleanup";
 import { sameRuntimeInputAttachment } from "./input-generation";
 import { runtimeVideoPacketSchema } from "./native-video-packet";
 import { NAVIGATION_METADATA_TIMEOUT_MS } from "./navigation-budget";
-import type { JsonValue } from "./runtime-protocol";
+import { type JsonValue, RuntimeProtocolError } from "./runtime-protocol";
 import { createViewerCaptureLifetime, type ViewerCaptureLifetime } from "./viewer-capture-lifetime";
 export type WorkspaceValidator = (workspaceId: string) => Promise<void | boolean>;
 type CaptureReply = Omit<RpcOutput<typeof captureBrowserRpc>, "state"> & { state: BrowserState };
@@ -79,7 +79,11 @@ const SCREENCAST_WAIT_MS = 500;
 
 export interface BrowserRuntimeClient {
   connect(): Promise<{ epoch: number }>;
-  ensureWorkspace(workspaceId: string): Promise<{
+  /** `replaceLost` is internal authority; without it a lost runtime is reported, never replaced. */
+  ensureWorkspace(
+    workspaceId: string,
+    options?: { replaceLost?: boolean },
+  ): Promise<{
     workspaceId: string;
     runtimeId: string;
     createdAt: number;
@@ -158,6 +162,9 @@ interface BrowserSession {
   canGoBack: boolean;
   canGoForward: boolean;
   error: string | null;
+  notice: string | null;
+  /** Set when the runtime reported it can never serve again; the next explicit attach replaces it. */
+  runtimeLost: boolean;
   archived: boolean;
   gesture: BrowserGesture | null;
   humanInputAdmission: HumanInputAdmission | null;
@@ -270,10 +277,17 @@ export class SessionManager {
     }
   }
 
+  /**
+   * `replaceLost` is internal authority held only by the supervisor's explicit human attach
+   * path. It lets this call replace a workspace runtime that reported it was lost (before or
+   * while attaching) exactly once; every other caller observes the lost session without
+   * restarting it.
+   */
   async attach(
     workspaceId: string,
     viewerLabel: string,
     tabId?: string,
+    options: { replaceLost?: boolean } = {},
   ): Promise<{ viewerToken: string; state: BrowserState }> {
     this.assertOpen();
     const label = viewerLabel.trim();
@@ -281,7 +295,45 @@ export class SessionManager {
     const validation = await this.validateWorkspace(workspaceId);
     if (validation === false) throw new Error("Workspace not found");
     this.assertOpen();
-    const session = await this.getOrCreateSession(workspaceId, tabId);
+    const replaceLost = options.replaceLost === true;
+    let session = await this.getOrCreateSession(workspaceId, tabId, replaceLost);
+    let replaced = false;
+    if (session.runtimeLost && replaceLost) {
+      session = await this.replaceLostRuntime(session);
+      replaced = true;
+    }
+    const attached = await this.attachViewer(session, label);
+    if (session.runtimeLost && replaceLost && !replaced) {
+      // The loss was first observed by this very attach. One fenced replacement, no input replay.
+      session = await this.replaceLostRuntime(session);
+      return this.attachViewer(session, label);
+    }
+    return attached;
+  }
+
+  /**
+   * Discards every page session of the dead workspace runtime behind fresh session and
+   * runtime ids; nothing is replayed. Page ids belong to the old browser, so the
+   * replacement attaches to the new browser's launch page.
+   */
+  private async replaceLostRuntime(lost: BrowserSession): Promise<BrowserSession> {
+    for (const candidate of [...this.sessions.values()]) {
+      if (candidate.workspaceId !== lost.workspaceId) continue;
+      candidate.archived = true;
+      candidate.videoLifetime?.cancel();
+      await this.cancelGesture(candidate);
+      for (const token of candidate.viewers.keys()) this.viewerSessions.delete(token);
+      candidate.viewers.clear();
+      candidate.controller = null;
+      this.sessions.delete(candidate.key);
+    }
+    return this.getOrCreateSession(lost.workspaceId, undefined, true);
+  }
+
+  private attachViewer(
+    session: BrowserSession,
+    label: string,
+  ): Promise<{ viewerToken: string; state: BrowserState }> {
     return this.serialize(session, async () => {
       if (session.archived) throw new Error("Browser session is closed");
       this.pruneExpired(session);
@@ -506,6 +558,14 @@ export class SessionManager {
     });
   }
 
+  /** A lost runtime keeps its typed code so observers can tell it from a transient failure. */
+  private metadataFailure(session: BrowserSession, error: string): Error {
+    const message = `Browser capture metadata failed: ${error}`;
+    return session.runtimeLost
+      ? new RuntimeProtocolError("RUNTIME_LOST", message)
+      : new Error(message);
+  }
+
   async capture(
     viewerToken: string,
     quality: CaptureQuality = DEFAULT_CAPTURE_QUALITY,
@@ -518,13 +578,13 @@ export class SessionManager {
       // Reconcile native document identity before capturing and again before
       // issuing authority. A same-URL reload can invalidate the captured pixels.
       const before = await this.snapshotState(session, viewerToken);
-      if (before.error) throw new Error(`Browser capture metadata failed: ${before.error}`);
+      if (before.error) throw this.metadataFailure(session, before.error);
       const inputGeneration = session.inputGeneration;
       const revision = session.frameRevision;
       const frame = await this.frameForQuality(session, quality);
       const observedAt = this.now();
       const state = await this.snapshotState(session, viewerToken);
-      if (state.error) throw new Error(`Browser capture metadata failed: ${state.error}`);
+      if (state.error) throw this.metadataFailure(session, state.error);
       if (
         inputGeneration !== session.inputGeneration ||
         revision !== session.frameRevision ||
@@ -1279,7 +1339,11 @@ export class SessionManager {
     this.reset();
   }
 
-  private async getOrCreateSession(workspaceId: string, tabId?: string): Promise<BrowserSession> {
+  private async getOrCreateSession(
+    workspaceId: string,
+    tabId?: string,
+    replaceLost = false,
+  ): Promise<BrowserSession> {
     if (this.archived.has(workspaceId)) throw new Error("Workspace was archived");
     const closing = this.sessionClosures.get(workspaceId);
     if (closing) await closing.catch(() => undefined);
@@ -1297,13 +1361,13 @@ export class SessionManager {
     )?.[1];
     if (workspaceCreation) {
       await workspaceCreation.catch(() => undefined);
-      return this.getOrCreateSession(workspaceId, tabId);
+      return this.getOrCreateSession(workspaceId, tabId, replaceLost);
     }
     const key = tabId ? `${workspaceId}/${tabId}` : workspaceId;
     if (this.sessions.size + this.sessionCreations.size >= this.maxSessions)
       throw new Error(`Shared browser session limit (${this.maxSessions}) reached`);
     const lifecycleGeneration = this.lifecycleGeneration;
-    const creation = this.createSession(workspaceId, key, tabId);
+    const creation = this.createSession(workspaceId, key, tabId, replaceLost);
     this.sessionCreations.set(key, creation);
     try {
       const session = await creation;
@@ -1327,10 +1391,11 @@ export class SessionManager {
     workspaceId: string,
     key: string,
     requestedTabId?: string,
+    replaceLost = false,
   ): Promise<BrowserSession> {
     let runtimeId: string | null = null;
     try {
-      const descriptor = await this.client.ensureWorkspace(workspaceId);
+      const descriptor = await this.client.ensureWorkspace(workspaceId, { replaceLost });
       runtimeId = descriptor.runtimeId;
       const initialTarget = requestedTabId ? { targetId: requestedTabId } : null;
       const identity = asRecord(
@@ -1386,6 +1451,11 @@ export class SessionManager {
         canGoBack: Boolean(state.canGoBack),
         canGoForward: Boolean(state.canGoForward),
         error: null,
+        notice:
+          typeof identity.displayNotice === "string"
+            ? boundedText(identity.displayNotice, 256)
+            : null,
+        runtimeLost: false,
         archived: false,
         gesture: null,
         humanInputAdmission: null,
@@ -1415,12 +1485,22 @@ export class SessionManager {
     input: JsonValue,
   ): Promise<JsonValue> {
     if (session.archived) throw new Error("Workspace was archived");
-    if (!session.tabId) return this.client.requestWorkspace(session.workspaceId, operation, input);
     const data = input && typeof input === "object" && !Array.isArray(input) ? input : {};
-    return this.client.requestWorkspace(session.workspaceId, operation, {
-      ...data,
-      targetId: session.tabId,
-    });
+    return this.client
+      .requestWorkspace(
+        session.workspaceId,
+        operation,
+        session.tabId ? { ...data, targetId: session.tabId } : input,
+      )
+      .catch((error) => {
+        if (error instanceof RuntimeProtocolError && error.code === "RUNTIME_LOST") {
+          // The workspace's single browser is gone, so every page session of it is gone.
+          session.runtimeLost = true;
+          for (const candidate of this.sessions.values())
+            if (candidate.workspaceId === session.workspaceId) candidate.runtimeLost = true;
+        }
+        throw error;
+      });
   }
 
   /** Cleanup depends on viewer ownership, never on whether capture produced pixels. */
@@ -1948,6 +2028,7 @@ export class SessionManager {
       controllerExpiresAt: controller ? new Date(controller.expiresAt).toISOString() : null,
       viewerCount: session.viewers.size,
       error: session.error,
+      ...(session.notice ? { notice: session.notice } : {}),
     };
   }
 }

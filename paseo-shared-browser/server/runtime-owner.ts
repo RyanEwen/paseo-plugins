@@ -11,7 +11,11 @@ import {
 import { resolveBrowserRuntimeRoot } from "./runtime-path";
 import type { JsonValue } from "./runtime-protocol";
 import type { RuntimeOwner } from "./supervisor";
-import { createPrivateVirtualDisplay, type PrivateVirtualDisplay } from "./virtual-display";
+import {
+  createPrivateVirtualDisplay,
+  PrivateDisplayError,
+  type PrivateVirtualDisplay,
+} from "./virtual-display";
 
 const DEFAULT_BROWSER_URL = "https://example.com/";
 
@@ -22,11 +26,17 @@ interface OwnedRuntime {
   runtimeOptions: AgentBrowserRuntimeOptions;
   tabs: Map<string, Promise<AgentBrowserRuntime>>;
   display: PrivateVirtualDisplay | null;
+  /** Bounded, secret-free reason an opted-in private display is not in use. */
+  displayNotice: string | null;
 }
 interface RuntimeOwnerOptions {
   initialUrl?: string;
   headed?: boolean;
-  /** Explicit false keeps upstream headless launch behavior, including on Linux with Xvfb installed. */
+  /**
+   * Trusted opt-in for a private Linux Xvfb display. When omitted, each runtime creation reads
+   * PASEO_SHARED_BROWSER_XVFB from this process's environment and enables it only for "1".
+   * Explicit false overrides the environment.
+   */
   virtualDisplay?: boolean;
 }
 
@@ -96,22 +106,24 @@ export async function createRuntimeOwner(
   return {
     async create(workspaceId) {
       const hash = createHash("sha256").update(workspaceId).digest("hex");
-      // Explicit headed mode uses the caller's real display. Hidden Linux mode
+      // Explicit headed mode uses the caller's real display. An opted-in hidden Linux mode
       // gets a private virtual mouse so native pointer media survive emulation.
       let display: PrivateVirtualDisplay | null = null;
-      if (
-        !options.headed &&
-        options.virtualDisplay !== false &&
-        process.env.PASEO_SHARED_BROWSER_XVFB !== "0"
-      ) {
+      let displayNotice: string | null = null;
+      const wantsDisplay = options.virtualDisplay ?? process.env.PASEO_SHARED_BROWSER_XVFB === "1";
+      if (!options.headed && wantsDisplay) {
         try {
           display = await createPrivateVirtualDisplay();
-        } catch {
+          if (!display) displayNotice = "Private display unavailable: Xvfb was not found.";
+        } catch (error) {
           // The helper has finished cleanup and no Chromium was constructed yet.
-          // Optional display support must not break existing headless installs.
-          console.warn(
-            "[shared-browser] Private display unavailable; using existing headless mode.",
-          );
+          displayNotice = `Private display unavailable: ${
+            error instanceof PrivateDisplayError ? error.message : "unexpected startup failure"
+          }.`;
+        }
+        if (displayNotice) {
+          // The detached supervisor discards stdio; the notice also reaches the viewer state.
+          console.warn(`[shared-browser] ${displayNotice} Using headless mode.`);
         }
       }
       let runtime: AgentBrowserRuntime | null = null;
@@ -137,13 +149,23 @@ export async function createRuntimeOwner(
           runtimeOptions,
           tabs: new Map(),
           display,
+          displayNotice,
         };
       } catch (error) {
+        let cleanupFailure: unknown = null;
         try {
           await runtime?.shutdown();
+        } catch (failure) {
+          cleanupFailure = failure;
         } finally {
           await display?.stop();
         }
+        // An unconfirmed cleanup must not hide why creation failed.
+        if (cleanupFailure)
+          throw new AggregateError(
+            [error, cleanupFailure],
+            `Runtime creation failed (${error instanceof Error ? error.message : String(error)}) and its cleanup was not confirmed`,
+          );
         throw error;
       }
     },
@@ -194,8 +216,13 @@ export async function createRuntimeOwner(
           : owned.runtime;
       const gestureId = typeof data.gestureId === "string" ? data.gestureId : undefined;
       switch (operation) {
-        case "identity":
-          return runtime.identity() as unknown as JsonValue;
+        case "identity": {
+          const identity = await runtime.identity();
+          return {
+            ...identity,
+            ...(owned.displayNotice ? { displayNotice: owned.displayNotice } : {}),
+          } as unknown as JsonValue;
+        }
         case "state":
           if (data.timeoutMs === undefined) return runtime.state() as unknown as JsonValue;
           if (typeof data.timeoutMs !== "number")

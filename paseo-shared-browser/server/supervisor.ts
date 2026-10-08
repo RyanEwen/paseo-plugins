@@ -32,6 +32,7 @@ import {
   parseRuntimeRequest,
   RUNTIME_PROTOCOL_VERSION,
   type RuntimeDescriptor,
+  RuntimeLostError,
   RuntimeProtocolError,
   type RuntimeRequest,
   type RuntimeResponse,
@@ -79,6 +80,7 @@ export interface RuntimeSupervisorOptions<Runtime extends RuntimeInstance> {
 
 interface WorkspaceEntry<Runtime extends RuntimeInstance> {
   createdAt: number;
+  lost?: boolean;
   runtime: Runtime;
 }
 
@@ -149,7 +151,8 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
       validateWorkspace: async (workspaceId) => !this.archived.has(workspaceId),
       client: {
         connect: async () => ({ epoch: this.nextEpoch }),
-        ensureWorkspace: (workspaceId) => this.ensureWorkspaceLocal(workspaceId),
+        ensureWorkspace: (workspaceId, options) =>
+          this.ensureWorkspaceLocal(workspaceId, options?.replaceLost === true),
         requestWorkspace: (workspaceId, operation, input) =>
           this.requestWorkspaceLocal(workspaceId, operation, input),
         archiveWorkspace: (workspaceId) => this.archiveWorkspaceLocal(workspaceId).then(() => {}),
@@ -265,10 +268,28 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
     this.assertActiveBridge(bridgeId, epoch);
   }
 
-  private ensureWorkspaceLocal(workspaceId: string): Promise<RuntimeDescriptor> {
+  private ensureWorkspaceLocal(
+    workspaceId: string,
+    replaceLost = false,
+  ): Promise<RuntimeDescriptor> {
     return this.runWorkspaceOperation(workspaceId, async () => {
       if (this.archived.has(workspaceId)) this.workspaceArchived(workspaceId);
       let entry = this.workspaces.get(workspaceId);
+      if (entry?.lost) {
+        // Only the in-process explicit human attach carries this authority; protocol
+        // workspace.ensure and implicit agent paths observe the loss instead.
+        if (!replaceLost)
+          throw new RuntimeProtocolError(
+            "RUNTIME_LOST",
+            "Workspace runtime was lost; reconnect explicitly to replace it",
+          );
+        // Fail closed: release the dead runtime before any replacement exists.
+        // Stop first: if the daemon's exit cannot be confirmed the entry stays lost and
+        // no replacement is created behind a possibly live session.
+        await this.owner.stop(entry.runtime);
+        this.workspaces.delete(workspaceId);
+        entry = undefined;
+      }
       if (!entry) {
         let creation = this.creations.get(workspaceId);
         if (!creation) {
@@ -341,6 +362,10 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
         return result;
       } catch (error) {
         if (error instanceof RuntimeProtocolError) throw error;
+        if (error instanceof RuntimeLostError) {
+          entry.lost = true;
+          throw new RuntimeProtocolError("RUNTIME_LOST", error.message);
+        }
         if (error instanceof CdpUnknownOutcomeError)
           throw new RuntimeProtocolError(
             "UNKNOWN_OUTCOME",
@@ -403,6 +428,8 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
           requireText(data, "workspaceId"),
           requireText(data, "viewerLabel"),
           typeof data.tabId === "string" ? data.tabId : undefined,
+          // Only this bridge-authorised human attach may replace a lost runtime.
+          { replaceLost: true },
         );
         break;
       case "detach":

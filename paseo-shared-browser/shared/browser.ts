@@ -83,6 +83,7 @@ export const browserStateSchema = z.object({
   controllerExpiresAt: z.string().datetime().nullable(),
   viewerCount: z.number().int().nonnegative(),
   error: z.string().max(2_048).nullable(),
+  notice: z.string().max(256).optional(),
   runtimeId: runtimeIdSchema.optional(),
   tabId: browserTabIdSchema.optional(),
   runtimeCreatedAt: epochSchema.optional(),

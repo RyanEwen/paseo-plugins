@@ -207,14 +207,10 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
 - The address-bar Browser menu contains a Send keys submenu and reconnect actions. On desktop,
   keys open beside the menu; on compact screens, Back returns to the parent menu. Extra keys
   are no longer shown below the canvas or in a separate dialog.
-- On native phones, Keyboard in that menu opens the software keyboard for basic live typing
-  and Backspace without a visible text box. Autocorrection is disabled. Native hardware
-  shortcuts are not supported by this software-keyboard relay. Extra keys remain available in
-  the Send keys submenu.
-- On native phones and compact web layouts, Compose text opens a visible local draft. **Insert**
-  sends it once to the focused page field and **Insert and Enter** also presses Enter. It
-  requires human control and is independent of the live software-keyboard relay.
-  Software-keyboard behavior still needs physical-device testing.
+- On native phones and compact web layouts, **Compose text** in the Browser menu opens a visible
+  local draft. **Done** inserts it once into the focused page field; it requires human control and
+  is dropped if control or the page changes. There is no live software-keyboard relay. Phone
+  keyboard behavior still needs physical-device testing.
 - While the Resolution and quality dialog or a toolbar menu is open, canvas input is not
   forwarded and held gestures are cancelled.
 - Local plain-text paste is forwarded; remote copy/cut are not synchronized to the local clipboard.

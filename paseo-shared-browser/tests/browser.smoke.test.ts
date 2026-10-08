@@ -32,6 +32,15 @@ function target(frame: BrowserFrame) {
   };
 }
 
+/** The runtime bounds each browser launch (cold start) by a 15 s command timeout. This test
+ * performs two real launches, the initial attach and the explicit reopen after close, so a slow
+ * runner (Windows CI cold start is ~14 s) legitimately spends ~29 s in launches alone. Budget both
+ * launches at their product bound plus the remaining operations; a hung launch still fails first
+ * with the runtime's own named timeout error rather than waiting for this budget. */
+const BROWSER_LAUNCH_BOUND_MS = 15_000;
+const SMOKE_BUDGET_MS = 2 * BROWSER_LAUNCH_BOUND_MS + 15_000;
+vi.setConfig({ testTimeout: SMOKE_BUDGET_MS });
+
 it("shares and persists a production agent-browser runtime across supervisor clients", async () => {
   const preparedHome = process.env.PASEO_HOME ?? join(homedir(), ".paseo");
   const runtimeRoot = resolveBrowserRuntimeRoot(preparedHome);

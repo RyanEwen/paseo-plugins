@@ -59,7 +59,15 @@ function fakeDom() {
   return { node, document, fire };
 }
 
-const key = { key: "a", code: "KeyA", altKey: false, ctrlKey: false, metaKey: false, shiftKey: false, repeat: false };
+const key = {
+  key: "a",
+  code: "KeyA",
+  altKey: false,
+  ctrlKey: false,
+  metaKey: false,
+  shiftKey: false,
+  repeat: false,
+};
 
 function bind() {
   const dom = fakeDom();

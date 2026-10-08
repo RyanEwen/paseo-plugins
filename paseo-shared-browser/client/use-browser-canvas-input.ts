@@ -227,7 +227,9 @@ export function useBrowserCanvasInput(options: CanvasOptions) {
     (text: string): boolean => {
       if (!alive.current || !current.current.enabled || !text) return false;
       if (text.length > 16_000) {
-        current.current.onError(new Error("Text is too long. Send up to 16,000 characters at once."));
+        current.current.onError(
+          new Error("Text is too long. Send up to 16,000 characters at once."),
+        );
         return false;
       }
       const accepted = enqueueKeyboard({ kind: "text", text });

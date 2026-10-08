@@ -1334,6 +1334,9 @@ export class AgentBrowserRuntime {
     this.assertAttachmentCurrent(connection, attachmentGeneration);
 
     this.invalidateScreencastFrame();
+    // Detaching drops the session that holds any pressed button; release there first.
+    if (this.liveInput?.page === previous) await this.endLiveInput(this.liveInput.id);
+    await this.releaseHeldInput(previous);
     this.page = null;
     this.emulationAppliedPage = null;
     // Detach first: the former session can otherwise clear the newly applied override.

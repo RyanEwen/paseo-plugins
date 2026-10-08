@@ -3,7 +3,7 @@ import { chmod, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { BrowserFrame, BrowserState, Viewport } from "../shared/browser";
+import type { BrowserFrame, BrowserInputEvent, BrowserState, Viewport } from "../shared/browser";
 import {
   beginBrowserGestureRpc,
   endBrowserGestureRpc,
@@ -499,6 +499,16 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
           controlToken,
           expected,
           viewport: data.viewport as Viewport,
+        });
+      } else if (operation === "input") {
+        if (!binding.lastFrame)
+          throw new RuntimeProtocolError("INVALID_REQUEST", "Capture a frame before sending input");
+        result = await this.browserPolicy.sendInput({
+          viewerToken,
+          controlToken,
+          expected,
+          target: binding.lastFrame,
+          event: data.event as BrowserInputEvent,
         });
       } else {
         throw new RuntimeProtocolError("INVALID_REQUEST", `Unknown agent operation: ${operation}`);

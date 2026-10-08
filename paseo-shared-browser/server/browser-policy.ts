@@ -915,8 +915,8 @@ export class SessionManager {
       this.requireMutationAccess(session, input);
       this.requireRecentFrame(session, input.target);
       const assertTargetCurrent = this.discreteInputGuard(session, input);
-      await this.cancelGesture(session);
       try {
+        await this.cancelGesture(session);
         await this.dispatchDiscreteInput(session, input.event, assertTargetCurrent);
       } finally {
         const hadVideo = session.videoReceipts.size > 0 || session.videoReads.size > 0;
@@ -1797,6 +1797,9 @@ export class SessionManager {
     event: BrowserInputEvent,
     assertTargetCurrent: () => Promise<void>,
   ): Promise<void> {
+    // Reconcile the captured document before anything is published, hover included, so a
+    // stalled or failed metadata read holds back every native primitive.
+    await assertTargetCurrent();
     if (session.inputGeneration === null) {
       throw new Error("Browser input identity is unavailable");
     }
@@ -1819,15 +1822,13 @@ export class SessionManager {
     assertTargetCurrent: () => Promise<void>,
     gestureId: string,
   ): Promise<void> {
-    // Hover keeps its existing fast path: it must not wait behind page metadata
-    // while video is pending. The pinned channel still refuses a replaced
-    // attachment or document without any metadata round trip.
+    // The document was reconciled and pinned by dispatchDiscreteInput; the runtime refuses
+    // every primitive below once its attachment or document differs from that pin.
     if (event.kind === "move") {
       const point = mapDisplayedPoint(event.point, session.viewport);
       await this.request(session, "mouse.move", { x: point.x, y: point.y, gestureId });
       return;
     }
-    await assertTargetCurrent();
     if (event.kind === "type") {
       await this.request(session, "text.insert", {
         text: event.text,

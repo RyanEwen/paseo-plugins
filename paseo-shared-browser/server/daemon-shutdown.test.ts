@@ -122,10 +122,14 @@ describe.skipIf(process.platform !== "linux")("owned daemon shutdown", () => {
     const f = await fixture(200);
     const daemon = await ownChild(f.native.ownerNonce);
     await f.recordPid(daemon.pid as number);
+    const kill = vi.spyOn(process, "kill");
     await f.runtime.shutdown();
     // exit was confirmed before shutdown returned; the OS only has to deliver the status
     await exited(daemon);
-    expect(daemon.signalCode).toBe("SIGKILL");
+    // Portable contract (signalCode is POSIX-only): the runtime asked for SIGKILL of the
+    // owned pid, and that process is observably gone.
+    expect(kill).toHaveBeenCalledWith(daemon.pid, "SIGKILL");
+    expect(daemon.pid && alive(daemon.pid)).toBe(false);
     expect(cli.closes).toBe(1);
     await expect(readFile(join(f.ipc, "owned.pid"))).rejects.toThrow();
   });
@@ -216,7 +220,10 @@ describe("unknown daemon state is never confirmed exit", () => {
     await writeFile(join(f.ipc, "owned.pid"), String(daemon.pid));
     await f.runtime.shutdown(true);
     await exited(daemon);
-    expect(daemon.signalCode).toBe("SIGKILL");
+    // Portable contract (signalCode is POSIX-only): the runtime asked for SIGKILL of the
+    // owned pid, and that process is observably gone.
+    expect(kill).toHaveBeenCalledWith(daemon.pid, "SIGKILL");
+    expect(daemon.pid && alive(daemon.pid)).toBe(false);
   });
 
   it("does not treat a later unreadable identity as exit and never signals on it", async () => {
@@ -235,7 +242,10 @@ describe("unknown daemon state is never confirmed exit", () => {
     probe.unreadable = false;
     await f.runtime.shutdown(true);
     await exited(daemon);
-    expect(daemon.signalCode).toBe("SIGKILL");
+    // Portable contract (signalCode is POSIX-only): the runtime asked for SIGKILL of the
+    // owned pid, and that process is observably gone.
+    expect(kill).toHaveBeenCalledWith(daemon.pid, "SIGKILL");
+    expect(daemon.pid && alive(daemon.pid)).toBe(false);
   });
 
   it("shares one in-flight shutdown and never reports success after a failed one", async () => {

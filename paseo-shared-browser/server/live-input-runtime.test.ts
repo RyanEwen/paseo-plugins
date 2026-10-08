@@ -113,6 +113,30 @@ describe("runtime-owned live input", () => {
     await expect(state.runtime.mouseMove(20, 30, "owned")).rejects.toThrow("attachment");
   });
 
+  it("releases a cancelled held drag at its last native pointer position, not the origin", async () => {
+    const state = fixture();
+    await state.runtime.beginLiveInput("owned");
+    await state.runtime.mouseDown(10, 20, "left", 1, "owned");
+    await state.runtime.mouseMove(300, 410, "owned");
+    await state.runtime.endLiveInput("owned");
+    const released = state.calls.filter((call) => call.params.type === "mouseReleased");
+    expect(released).toHaveLength(1);
+    expect(released[0]?.params).toMatchObject({ x: 300, y: 410, button: "left", buttons: 0 });
+  });
+
+  it("releases a held button where an unacknowledged press was sent", async () => {
+    const state = fixture();
+    await state.runtime.beginLiveInput("owned");
+    state.intercept(async (method) => {
+      if (method === "Input.dispatchMouseEvent") throw new Error("Unknown publication outcome");
+    });
+    await expect(state.runtime.mouseDown(55, 66, "left", 1, "owned")).rejects.toThrow();
+    state.intercept(async () => {});
+    await state.runtime.endLiveInput("owned");
+    const released = state.calls.filter((call) => call.params.type === "mouseReleased");
+    expect(released[0]?.params).toMatchObject({ x: 55, y: 66 });
+  });
+
   it("acknowledged moves renew idle expiry but never the absolute five-minute limit", async () => {
     vi.useFakeTimers();
     const state = fixture();

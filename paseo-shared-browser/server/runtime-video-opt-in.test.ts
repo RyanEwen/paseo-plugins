@@ -1,10 +1,22 @@
 /** Encoded video is host-opt-in: image-only sessions never load the capture extension. */
 
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentBrowserRuntime } from "./agent-browser-runtime";
+
+// The owned CLI is simulated at the process boundary, as in daemon-shutdown.test.ts: a
+// POSIX-shebang script is not executable on Windows, so no executable file is required.
+vi.mock("node:child_process", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:child_process")>()),
+  execFile: (
+    _file: string,
+    _args: string[],
+    _options: unknown,
+    callback: (error: null, result: { stdout: string }) => void,
+  ) => callback(null, { stdout: "0.38.2\n" }),
+}));
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -15,7 +27,6 @@ async function fixture(nativeVideo?: boolean) {
   const directory = await mkdtemp(join(tmpdir(), "shared-browser-video-opt-in-"));
   temporary.push(directory);
   const binary = join(directory, "owned-cli");
-  await writeFile(binary, `#!${process.execPath}\nconsole.log("0.38.2");\n`, { mode: 0o700 });
   const ipcDirectory = join(directory, "ipc");
   const runtime = new AgentBrowserRuntime({
     binaryPath: binary,

@@ -277,6 +277,8 @@ export class AgentBrowserRuntime {
     onError: () => console.warn("Shared Browser could not retire unused JPEG capture"),
   });
   private heldButtons = new Set<MouseButton>();
+  /** Last native pointer position sent, so cancelled drags release where they were. */
+  private lastMousePoint = { x: 0, y: 0 };
   private heldKeys = new Map<string, { key: string; code: string }>();
   private heldTouches = false;
   private activeTouches = new Map<number, { x: number; y: number; id: number }>();
@@ -1274,6 +1276,7 @@ export class AgentBrowserRuntime {
   async mouseMove(x: number, y: number, gestureId?: string, modifiers?: number): Promise<void> {
     this.assertPoint(x, y);
     this.assertMouseModifiers(modifiers);
+    this.lastMousePoint = { x, y };
     await this.dispatchInput(
       "Input.dispatchMouseEvent",
       {
@@ -1319,6 +1322,7 @@ export class AgentBrowserRuntime {
     // first so cleanup still releases a possibly held button.
     if (gestureId) await this.assertLiveInput(gestureId);
     this.heldButtons.add(button);
+    this.lastMousePoint = { x, y };
     await this.dispatchInput(
       "Input.dispatchMouseEvent",
       {
@@ -1344,6 +1348,7 @@ export class AgentBrowserRuntime {
   ): Promise<void> {
     this.assertPoint(x, y);
     this.assertMouseModifiers(modifiers);
+    this.lastMousePoint = { x, y };
     await this.dispatchInput(
       "Input.dispatchMouseEvent",
       {
@@ -1585,6 +1590,7 @@ export class AgentBrowserRuntime {
       return;
     }
     const buttons = [...this.heldButtons];
+    const { x, y } = this.lastMousePoint;
     const keys = [...this.heldKeys.values()];
     this.heldButtons.clear();
     this.heldKeys.clear();
@@ -1606,8 +1612,8 @@ export class AgentBrowserRuntime {
           "Input.dispatchMouseEvent",
           {
             type: "mouseReleased",
-            x: 0,
-            y: 0,
+            x,
+            y,
             button,
             buttons: 0,
             clickCount: 1,

@@ -816,6 +816,11 @@ export class AgentBrowserRuntime {
       { enabled: device.touch, maxTouchPoints: device.touch ? 5 : 1 },
       { mutation: true },
     );
+    // A page controlled through its own session may sit behind another tab in the shared
+    // browser. Chromium holds a hidden page's mouseMoved acknowledgement for ~5 s (equal to the
+    // input idle bound), so every press there failed. Target-scoped focus emulation makes only
+    // this page report visible/focused: no tab is raised and no viewer's selection changes.
+    await page.send("Emulation.setFocusEmulationEnabled", { enabled: true }, { mutation: true });
     if (device.userAgent) {
       await page.send(
         "Emulation.setUserAgentOverride",

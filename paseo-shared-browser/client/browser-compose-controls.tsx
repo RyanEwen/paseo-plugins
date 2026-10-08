@@ -1,19 +1,19 @@
-/** Native typing sink and explicit Compose draft UI, with original control/document ownership pinned until Done. */
+/** Explicit Compose draft UI, with original control/document ownership pinned until Done. */
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { Modal, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useRef, useState } from "react";
-import { TextInput as NativeTextInput, Text, View } from "react-native";
+import { Text, View } from "react-native";
 import { ControlButton } from "./browser-chrome";
 import type { createStyles } from "./browser-panel-styles";
-import type { useBrowserCanvasInput } from "./use-browser-canvas-input";
 
 type Theme = PluginWorkspacePanelProps["theme"];
 
-/** Native software keyboard access; complex drafts are inserted only by explicit Done. */
-export function NativeKeyboardControls({
+/** Visible draft sheet; text reaches the focused page field only by an explicit Done. */
+export function ComposeTextControls({
   styles,
   theme,
-  relay,
+  composeText,
+  cancelInput,
   enabled,
   ownershipKey,
   documentKey,
@@ -24,11 +24,12 @@ export function NativeKeyboardControls({
 }: {
   styles: ReturnType<typeof createStyles>;
   theme: Theme;
-  relay: ReturnType<typeof useBrowserCanvasInput>["nativeKeyboard"];
+  composeText(text: string): boolean;
+  cancelInput(): void;
   enabled: boolean;
   ownershipKey: string;
   documentKey: string;
-  request: { id: number; kind: "keyboard" | "compose" | "commit"; ownershipKey: string } | null;
+  request: { id: number; kind: "compose" | "commit"; ownershipKey: string } | null;
   onRequestHandled(id: number): void;
   onRequestControlForCompose(): void;
   canRequestControl: boolean;
@@ -50,8 +51,7 @@ export function NativeKeyboardControls({
     composeDocument.current = null;
   };
   const openCompose = () => {
-    relay.inputRef.current?.blur();
-    relay.reset();
+    cancelInput();
     composeOwner.current = ownershipKey;
     composeDocument.current = documentKey;
     setComposeOpen(true);
@@ -67,39 +67,28 @@ export function NativeKeyboardControls({
     )
       return;
     composeOwner.current = null;
-    if (relay.composeText(draft)) {
+    if (composeText(draft)) {
       closeCompose();
     } else {
       // false means nothing was admitted, so the same draft remains reviewable.
       composeOwner.current = ownershipKey;
     }
   };
-  // Menu dismissal commits before this focus effect. The hidden input remains
-  // mounted outside the menu so closing it cannot remove the typing sink.
+  // Menu dismissal commits before this effect; the sheet is mounted outside the menu.
   useEffect(() => {
     if (!request || handledRequest.current === request.id) return;
     handledRequest.current = request.id;
     if (enabled && request.ownershipKey === ownershipKey) {
-      if (request.kind === "keyboard") relay.focus();
-      else if (request.kind === "compose") openCompose();
+      if (request.kind === "compose") openCompose();
       else if (composeOpen && composeDocument.current === documentKey && draft) {
         composeOwner.current = ownershipKey;
         commit();
       }
     }
     onRequestHandled(request.id);
-  }, [request, enabled, ownershipKey, documentKey, relay, onRequestHandled]);
+  }, [request, enabled, ownershipKey, documentKey, onRequestHandled]);
   return (
     <>
-      <NativeTextInput
-        key={relay.inputKey}
-        ref={relay.inputRef}
-        {...relay.inputProps}
-        editable={enabled}
-        caretHidden
-        accessibilityLabel="Shared browser software keyboard"
-        style={{ position: "absolute", width: 1, height: 1, opacity: 0 }}
-      />
       <Modal
         title="Compose text"
         open={composeOpen}

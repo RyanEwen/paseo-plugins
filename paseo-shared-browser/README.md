@@ -299,11 +299,9 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
 - The address-bar Browser menu contains a Send keys submenu and reconnect actions. On desktop,
   keys open beside the menu; on compact screens, Back returns to the parent menu. Extra keys
   are no longer shown below the canvas or in a separate dialog.
-- On native phones, Keyboard in that menu opens the software keyboard for basic live typing
-  and Backspace
-  without a visible text box. Autocorrection is disabled. Compose opens an explicit local
-  draft for IME text, inserted once with Done. Native hardware shortcuts are not supported
-  by this software-keyboard relay. Extra keys remain available in the Send keys submenu.
+- On native phones, Compose text in that menu opens an explicit local draft for keyboard or IME
+  text, inserted once into the focused page field when you choose Done. Live software-keyboard
+  relay is not provided; extra keys remain available in the Send keys submenu.
 - Local plain-text paste is forwarded; remote copy/cut are not synchronized to the local clipboard.
 - The address-bar mobile toggle changes shared emulation while preserving the current display
   dimensions and capture density. Choose a resolution explicitly to change the display.

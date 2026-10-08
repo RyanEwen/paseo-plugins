@@ -231,6 +231,41 @@ describe("runtime-owned live input", () => {
     await expect(state.runtime.mouseMove(20, 30, "owned")).rejects.toThrow("attachment");
   });
 
+  it.each(["move", "up"] as const)(
+    "an expired %s rejected before publication does not change the release point",
+    async (operation) => {
+      vi.useFakeTimers();
+      const state = fixture();
+      await state.begin("owned");
+      await state.runtime.mouseDown(10, 20, "left", 1, "owned");
+      // Move the clock without firing the timer so assertLiveInput owns the expiry.
+      vi.setSystemTime(Date.now() + 5_001);
+      const rejected =
+        operation === "move"
+          ? state.runtime.mouseMove(500, 600, "owned")
+          : state.runtime.mouseUp(500, 600, "left", 1, "owned");
+      await expect(rejected).rejects.toThrow("attachment");
+      expect(state.calls.filter((call) => call.params.type === "mouseReleased")).toMatchObject([
+        { params: { x: 10, y: 20 } },
+      ]);
+    },
+  );
+
+  it("a move rejected after replacement keeps the original attachment's last published point", async () => {
+    const state = fixture();
+    const replacement: unknown[] = [];
+    await state.begin("owned");
+    await state.runtime.mouseDown(10, 20, "left", 1, "owned");
+    await state.runtime.mouseMove(30, 40, "owned");
+    state.control.page = { send: async (...args: unknown[]) => replacement.push(args) } as never;
+    await expect(state.runtime.mouseMove(500, 600, "owned")).rejects.toThrow("attachment");
+    await state.runtime.endLiveInput("owned");
+    expect(replacement).toEqual([]);
+    expect(state.calls.filter((call) => call.params.type === "mouseReleased")).toMatchObject([
+      { params: { x: 30, y: 40 } },
+    ]);
+  });
+
   it("acknowledged moves renew idle expiry but never the absolute five-minute limit", async () => {
     vi.useFakeTimers();
     const state = fixture();

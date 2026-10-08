@@ -44,8 +44,10 @@ organization names.
   It strips inherited `AGENT_BROWSER_*` variables and sets `AGENT_BROWSER_SOCKET_DIR`,
   `AGENT_BROWSER_IDLE_TIMEOUT_MS=0`, `AGENT_BROWSER_STREAM_PORT=0`, and
   `AGENT_BROWSER_NO_AUTO_DIALOG=1` itself.
-- Desktop/web clients with usable WebCodecs receive encoded workspace-tab video. Native and
-  unsupported clients receive JPEG frames from CDP `Page.startScreencast` or bounded screenshots.
+- By default every client receives JPEG frames from CDP `Page.startScreencast` or bounded
+  screenshots, and no capture extension is loaded into Chromium. When the daemon is started with
+  `PASEO_SHARED_BROWSER_VIDEO=1`, desktop/web clients with usable WebCodecs receive encoded
+  workspace-tab video instead; other clients keep JPEG.
   Remote input supports mouse hover, wheel scrolling, continuous dragging, native touch pan/pinch,
   tap, double-tap, right-click, text, and special keys.
 - Device presets for Desktop Chrome, iPhone 15 Pro, Pixel 7, and iPad Pro 11 change Chromium's
@@ -122,7 +124,7 @@ Pi agents also receive the adapter, but require Pi's optional MCP support to
 launch it.
 
 The injected MCP server exposes `shared_browser_status`, `shared_browser_capture`,
-`shared_browser_device`, `shared_browser_acquire_control`, `shared_browser_release_control`,
+`shared_browser_acquire_control`, `shared_browser_release_control`,
 `shared_browser_navigate`, `shared_browser_input`, `shared_browser_viewport`,
 `shared_browser_tabs`, `shared_browser_tab_open`, `shared_browser_tab_select`, and
 `shared_browser_tab_close`. It does not
@@ -187,16 +189,20 @@ User-supplied `AGENT_BROWSER_*` variables are deliberately ignored.
   page instead. Fitting images stay centered without empty scroll ranges; a scrollbar on
   one axis does not force one on the other. Returning to Fit resets local offsets without
   reloading the page or image.
-- Desktop and web clients with WebCodecs play genuine encoded tab video (H264 when supported,
-  otherwise VP8). The trusted bundled helper captures the exact workspace tab, not a screenshot
-  loop or title-selected window. Native apps and clients without usable video decoding keep the
-  existing JPEG fallback; the host `EncodedVideo` plugin API is not in a published plugin SDK.
-- The monitor menu's resolution and quality list separates JPEG quality (70%, 90%, 95%,
+- With `PASEO_SHARED_BROWSER_VIDEO=1` set in the daemon environment, desktop and web clients
+  with WebCodecs play genuine encoded tab video (H264 when supported, otherwise VP8). The
+  bundled capture helper, which holds `tabCapture` and `debugger` permissions, is then
+  loaded into every workspace Chromium profile and captures the exact workspace tab, not a
+  screenshot loop or title-selected window. Without the variable the helper is never
+  materialized or loaded, and clients show a one-time disabled reply then use JPEG.
+  Android and other native apps use JPEG: the plugin SDK this package targets publishes no
+  encoded-video surface, so native video is deferred until the host ships one.
+- The monitor menu's resolution and quality list separates JPEG quality (40%, 65%, 85%,
   or 100%), video bitrate (2, 5, 12, or 24 Mbps), and video frame rate (15, 30, or 60 FPS).
-  Defaults remain JPEG95 and 12 Mbps at 30 FPS. Old saved quality choices keep their
+  Defaults are JPEG65 (Medium) and, when video is enabled, 12 Mbps at 30 FPS. Old saved quality choices keep their
   corresponding video bitrate when upgraded. These are encoder targets, not measured
   bandwidth or guaranteed frame rates. Large JPEGs may reduce quality to stay within
-  the existing 4 MiB frame bound. Preferences persist on the connected Paseo host.
+  the 800 KB frame bound. Preferences persist on the connected Paseo host.
   Capture density defaults to Auto for each viewer panel. While controlling, it selects
   1x or 2x from the displayed page size and screen pixel density, accounting for Fit's
   letterboxing and Actual size. Manual 1x/2x choices override Auto until Auto is selected
@@ -397,7 +403,8 @@ host to recover a test failure.
 control handoff, reconnect, stale-frame rejection, viewport changes, device emulation, profile
 persistence, and archive teardown.
 
-`bun run test:video` is an optional real video gate. It reads prepared Chromium/CLI assets,
+`bun run test:video` is an optional real video gate. It opts its own runtime into encoded video
+and reads prepared Chromium/CLI assets,
 then creates its own temporary Paseo home, browser profile, Unix socket and local fixture pages.
 It checks the production video decoder and canvas at 1280x800, sharp Pixel and 2560x2560,
 including all four corner markers. It never uses the live browser. This gate requires usable
@@ -413,11 +420,14 @@ Conventional Commits in the monorepo.
 Both the Paseo daemon and app must satisfy the version range in `paseo-plugin.json`.
 The upstream 0.9, 0.10 and 0.11 ranges remain supported by the manifest;
 the tested `0.11.0-beta.3` prerelease is also allowed. Older daemon/client
-combinations still need runtime qualification. Encoded video requires the
-optional host decoding capability and retains JPEG fallback when unavailable. The client surface uses React Native primitives
-and works in desktop, web, iOS, and Android Paseo clients.
+combinations still need runtime qualification. Encoded video is opt-in on the daemon and
+requires WebCodecs in a web client; JPEG is always available. The client surface uses React
+Native primitives and works in desktop, web, iOS, and Android Paseo clients.
 
-For an initial, not-yet-admitted channel, a wheel capture can finish decoding
+Every independent press (mouse down or first touch contact) carries the decoded frame
+receipt that was visible when it was made. Receipts last five seconds and are spent by
+acknowledged input, so a stalled or superseded presentation cannot admit a later click;
+held drags, releases and keys continue on their channel. A wheel capture can finish decoding
 after input revoked its frame token. The server
 returns a known non-admission receipt before creating a new channel; the canvas waits
 for another decoded frame before admitting that still-unsent gesture. Recovery allows

@@ -188,4 +188,55 @@ describe("ComposeTextControls", () => {
     (done().onPress as () => void)();
     expect(composeText).not.toHaveBeenCalled();
   });
+
+  const cancel = () => find(tree, (p) => p.label === "Cancel").onPress as () => void;
+  const onOpenChange = () =>
+    find(tree, (p) => "onOpenChange" in p).onOpenChange as (o: boolean) => void;
+  const reopen = (id: number) => {
+    cancel()();
+    render({ request: { id, ownershipKey: "page-1" } });
+  };
+
+  it("a retained Done from a closed draft cannot publish or close a same-owner replacement", () => {
+    open();
+    const staleDone = done().onPress as () => void;
+    reopen(2);
+    draft("new draft");
+    render();
+    staleDone();
+    expect(composeText).not.toHaveBeenCalled();
+    (done().onPress as () => void)();
+    expect(composeText).toHaveBeenCalledTimes(1);
+    expect(composeText).toHaveBeenCalledWith("new draft");
+  });
+
+  it("a retained Cancel or dismissal from a closed draft cannot close the replacement", () => {
+    open();
+    const staleCancel = cancel();
+    const staleDismiss = onOpenChange();
+    reopen(2);
+    draft("keep me");
+    render();
+    staleCancel();
+    staleDismiss(false);
+    render();
+    expect(find(tree, (p) => "open" in p && "onOpenChange" in p).open).toBe(true);
+    (done().onPress as () => void)();
+    expect(composeText).toHaveBeenCalledWith("keep me");
+  });
+
+  it("a commit that synchronously opens a new draft publishes once and leaves that draft open", () => {
+    open();
+    composeText.mockImplementationOnce(() => {
+      reopen(2);
+      draft("second");
+      return true;
+    });
+    (done().onPress as () => void)();
+    render();
+    expect(find(tree, (p) => "open" in p && "onOpenChange" in p).open).toBe(true);
+    expect(composeText).toHaveBeenCalledTimes(1);
+    (done().onPress as () => void)();
+    expect(composeText).toHaveBeenLastCalledWith("second");
+  });
 });

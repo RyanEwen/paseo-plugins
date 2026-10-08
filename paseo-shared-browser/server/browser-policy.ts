@@ -215,9 +215,15 @@ export class SessionManager {
     }
   }
 
+  /**
+   * `replaceLost` is internal authority held only by the supervisor's explicit human attach
+   * path. It lets this call replace a runtime that reported RuntimeLostError (before or while
+   * attaching) exactly once; every other caller observes the lost session without restarting it.
+   */
   async attach(
     workspaceId: string,
     viewerLabel: string,
+    options: { replaceLost?: boolean } = {},
   ): Promise<{ viewerToken: string; state: BrowserState }> {
     this.assertOpen();
     const label = viewerLabel.trim();
@@ -226,12 +232,30 @@ export class SessionManager {
     if (validation === false) throw new Error("Workspace not found");
     this.assertOpen();
     let session = await this.getOrCreateSession(workspaceId);
-    if (session.runtimeLost) {
-      // Explicit reconnect replaces a dead runtime. The new session id and runtime id
-      // fence every old viewer, control lease and gesture; nothing is replayed.
-      await this.discardSession(session);
-      session = await this.getOrCreateSession(workspaceId);
+    let replaced = false;
+    if (session.runtimeLost && options.replaceLost) {
+      session = await this.replaceLostSession(session);
+      replaced = true;
     }
+    const attached = await this.attachViewer(session, label);
+    if (session.runtimeLost && options.replaceLost && !replaced) {
+      // The loss was first observed by this very attach. One fenced replacement, no input replay.
+      session = await this.replaceLostSession(session);
+      return this.attachViewer(session, label);
+    }
+    return attached;
+  }
+
+  /** Discards the dead session behind a fresh session id and runtime id; nothing is replayed. */
+  private async replaceLostSession(lost: BrowserSession): Promise<BrowserSession> {
+    await this.discardSession(lost);
+    return this.getOrCreateSession(lost.workspaceId);
+  }
+
+  private attachViewer(
+    session: BrowserSession,
+    label: string,
+  ): Promise<{ viewerToken: string; state: BrowserState }> {
     return this.serialize(session, async () => {
       this.pruneExpired(session);
       if (session.viewers.size >= MAX_VIEWERS_PER_SESSION)

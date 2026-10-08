@@ -303,6 +303,8 @@ export class RuntimeSupervisor<Runtime extends RuntimeInstance = RuntimeInstance
         result = await this.browserPolicy.attach(
           requireText(data, "workspaceId"),
           requireText(data, "viewerLabel"),
+          // Only this bridge-authorised human attach may replace a lost runtime.
+          { replaceLost: true },
         );
         break;
       case "detach":

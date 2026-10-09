@@ -7,8 +7,8 @@ experimental fork of [omercnet/paseo-plugins](https://github.com/omercnet/paseo-
 It accompanies [Ryan's Paseo fork](https://github.com/RyanEwen/paseo).
 
 The default branch, `ryan/preview`, contains the combined preview changes.
-`ryan/dev` is the development integration branch; feature branches keep individual
-changes separate for review. `main` retains the upstream branch history.
+Feature branches keep individual changes separate for review. `main` retains
+the upstream branch history.
 
 The Shared Browser additions include:
 

@@ -15,6 +15,10 @@ The Shared Browser additions include:
 - **Independent browser tabs:** Clients and agents select tabs separately while
   sharing the same site logins. New browsers start with one tab, new tabs retain
   their creation order, and agents can recover tab access after being idle.
+- **Agent connection recovery:** Agents can reconnect to their existing browser
+  and selected tab without replaying actions, or explicitly reopen a closed
+  browser. Recovery retains running tabs and drafts and respects human control.
+  Tab request validation also returns errors without leaving callers waiting.
 - **More browser controls:** Display and capture settings, mobile emulation, and
   continuous mouse and touch gestures.
 - **Live browser video:** Encoded video for supported desktop, web, and Android
